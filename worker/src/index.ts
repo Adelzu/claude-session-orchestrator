@@ -29,7 +29,7 @@ const SCOPE = 'mcp';
 const hub = (env: Env, userId: string) => env.USER_HUB.get(env.USER_HUB.idFromName(userId));
 const html = (body: string, status = 200, headers = new Headers()) => {
   headers.set('content-type', 'text/html; charset=utf-8');
-  headers.set('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self' https://github.com https://accounts.google.com; frame-ancestors 'none'");
+  headers.set('content-security-policy', "script-src 'self' 'unsafe-inline'; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self' https://github.com https://accounts.google.com https://claude.ai; frame-ancestors 'none'");
   headers.set('x-frame-options', 'DENY');
   return new Response(body, { status, headers });
 };
