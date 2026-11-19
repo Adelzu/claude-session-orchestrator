@@ -55,6 +55,19 @@ async function ensureProjectDir(m: Machine, p: Project, create: boolean): Promis
   return `Created ${projectDir(m, p)} with a new git repo.`;
 }
 
+/**
+ * Pre-accept Claude Code's first-run prompts for a folder this orchestrator just made: "trust this folder"
+ * and "allow external CLAUDE.md imports" (the brain context). Keys are per folder in ~/.claude.json.
+ * shortcut: read-modify-write races a Claude Code process writing the file at the same instant; the window is
+ * one jq run, and losing it only means the prompt shows once.
+ */
+async function trustFolder(m: Machine, dir: string): Promise<string | undefined> {
+  const keys = '{hasTrustDialogAccepted: true, hasClaudeMdExternalIncludesApproved: true, hasClaudeMdExternalIncludesWarningShown: true}';
+  return runOk(m, `command -v jq >/dev/null || exit 3; umask 077; d=$(cd ${qpath(dir)} && pwd -P) && f="$HOME/.claude.json" &&
+    { [ -s "$f" ] || echo '{}' > "$f"; } && jq --arg d "$d" '.projects[$d] = ((.projects[$d] // {}) + ${keys})' "$f" > "$f.cso-tmp" && mv "$f.cso-tmp" "$f"`)
+    .then(() => undefined, () => `Could not pre-trust the folder (needs jq on ${m.id}); answer the first prompt with session_approve.`);
+}
+
 export interface LiveSession extends SessionRow { reachable: boolean; last_activity: number | null }
 
 /** Reconcile tmux reality with the DB: new sessions get adopted, vanished ones become stopped. */
@@ -216,7 +229,7 @@ export function register(server: McpServer, ctx: Ctx) {
       };
     });
 
-  tool(server, ctx, 'session_start', 'Start a new Claude Code session in tmux for a project, always in the project\'s own folder (Remote Control on by default so it shows in the Claude app). The session is named after the project. Machine defaults to the project\'s machine. For a new project pass create=true: it gets its own folder and git repo (or a clone of repo) and is registered.',
+  tool(server, ctx, 'session_start', 'Start a new Claude Code session in tmux for a project, always in the project\'s own folder (Remote Control on by default so it shows in the Claude app). The session is named after the project. Machine defaults to the project\'s machine. For a new project pass create=true: it gets its own folder and git repo (or a clone of repo), is registered, and the folder is pre-trusted in Claude Code so no trust prompt blocks the session.',
     {
       project: z.string().describe('Project id or spoken alias; with create=true, the new project\'s name'),
       create: z.boolean().default(false).describe('New project: create its folder and git repo and register it'),
@@ -243,6 +256,8 @@ export function register(server: McpServer, ctx: Ctx) {
         p = { id, aliases: id === project.toLowerCase() ? [] : [project], machine: m.id, shared: [], ...(repo && { repo }) };
       }
       const setup = await ensureProjectDir(m, p, create);
+      // Only folders made here are trusted automatically; an existing folder keeps Claude Code's own prompt.
+      const trustWarning = setup ? await trustFolder(m, projectDir(m, p)) : undefined;
       if (isNew) p = saveProject(ctx.cfg, p);
       const sname = name ? `cc-${slug(name)}` : freeName(ctx, live, p.id);
       if (!tmux.SESSION_RE.test(sname)) throw new UserError(`"${name}" is not a usable session name.`);
@@ -261,7 +276,7 @@ export function register(server: McpServer, ctx: Ctx) {
       await tmux.newSession(m, sname, dir, cmd);
       ctx.db.upsertSession({ name: sname, machine: m.id, project: p.id, status: prompt ? 'working' : 'waiting_input', remote_control: remote_control ? 1 : 0 });
       ctx.db.setTranscript(sname, claudeId, null);
-      const base = `${setup ? `${setup} ` : ''}Started ${p.id} on ${m.id} as ${sname}${remote_control ? '; it shows in the Claude app' : ''}.${warning ? ` ${warning}` : ''}`;
+      const base = `${setup ? `${setup}${trustWarning ? ` ${trustWarning}` : ' Trusted it in Claude Code.'} ` : ''}Started ${p.id} on ${m.id} as ${sname}${remote_control ? '; it shows in the Claude app' : ''}.${warning ? ` ${warning}` : ''}`;
       const turn = prompt ? await sendAndWait(ctx, { ...ctx.db.session(sname)!, m }, wait, started) : null;
       return turn ? { ...turn, summary: `${base} ${turn.summary}`, session: sname } : { summary: base, session: sname };
     });

@@ -2,7 +2,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -387,14 +387,23 @@ test('session_delete stops, forgets, and optionally removes the transcript', asy
 });
 
 test('new project: own folder and git repo, project-named sessions, shared history', async () => {
+  mkdirSync(join(tmp, 'home'), { recursive: true });
+  writeFileSync(join(tmp, 'home', '.claude.json'), JSON.stringify({ oauthAccount: { id: 'keep' }, projects: { '/other': { hasTrustDialogAccepted: false } } }));
   assert.match((await call('session_start', { project: 'Side Quest' })).summary, /Unknown project/);
   const r = await call('session_start', { project: 'Side Quest', create: true, wait: 0 });
   assert.ok(!r.err, r.summary);
-  assert.match(r.summary, /Created .*side-quest with a new git repo\. Started side-quest on node2 as cc-side-quest/);
+  assert.match(r.summary, /Created .*side-quest with a new git repo\. Trusted it in Claude Code\. Started side-quest on node2 as cc-side-quest/);
   const dir = join(tmp, 'proj', 'side-quest');
   assert.ok(existsSync(join(dir, '.git')));
   assert.match(readFileSync(join(tmp, 'config', 'projects.yaml'), 'utf8'), /^# my projects\nprojects:\n  - id: side-quest\n[\s\S]*Side Quest/);
   assert.ok(cfg.projects.some((p) => p.id === 'side-quest'));
+  // The new folder is pre-trusted in Claude Code (trust dialog + external CLAUDE.md import).
+  const claudeJson = JSON.parse(readFileSync(join(tmp, 'home', '.claude.json'), 'utf8'));
+  assert.deepEqual(claudeJson.projects[realpathSync(dir)], { hasTrustDialogAccepted: true, hasClaudeMdExternalIncludesApproved: true, hasClaudeMdExternalIncludesWarningShown: true });
+  assert.match(r.summary, /Trusted it in Claude Code/);
+  assert.deepEqual(claudeJson.oauthAccount, { id: 'keep' }); // the rest of the file is untouched
+  assert.deepEqual(claudeJson.projects['/other'], { hasTrustDialogAccepted: false });
+  assert.equal(statSync(join(tmp, 'home', '.claude.json')).mode & 0o077, 0); // stays private
 
   // A second concurrent session gets the next project-named slot; the spoken alias resolves too.
   const r2 = await call('session_start', { project: 'side quest', wait: 0 });
@@ -407,6 +416,8 @@ test('new project: own folder and git repo, project-named sessions, shared histo
   const r3 = await call('session_start', { project: 'side-quest', wait: 0 });
   assert.equal(r3.session, 'cc-side-quest-3'); // -2 is still tracked, so its history is not overwritten
   assert.match(readFileSync(join(tmp, 'brain', 'projects', 'side-quest', 'context.md'), 'utf8'), /## Recent sessions[\s\S]*Done with refactor/);
+
+  assert.equal(JSON.parse(readFileSync(join(tmp, 'home', '.claude.json'), 'utf8')).projects[realpathSync(join(tmp, 'proj', 'demo'))], undefined);
 
   const hist = await call('project_sessions', { project: 'side quest' });
   assert.match(hist.summary, /side-quest has had 3 sessions, 2 running/);
