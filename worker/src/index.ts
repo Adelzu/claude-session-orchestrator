@@ -19,7 +19,7 @@ export interface Env {
   USER_HUB: DurableObjectNamespace<UserHub>;
   OAUTH_PROVIDER: OAuthHelpers;
   COOKIE_SECRET: string;
-  GITHUB_CLIENT_ID?: string; GITHUB_CLIENT_SECRET?: string;
+  GITHUB_CLIENT_ID?: string; GITHUB_CLIENT_SECRET?: string; ALLOWED_GITHUB_IDS?: string;
   GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string;
   DEV_LOGIN?: string;
 }
