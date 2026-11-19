@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Status } from '../summarize.ts';
 import { SESSION_RE } from '../tmux.ts';
 import { ago, tool, type Ctx } from './common.ts';
-import { refresh, writeLog } from './sessions.ts';
+import { projectOf, refresh, writeLog } from './sessions.ts';
 import { isSessionId, isTranscriptPath } from '../transcript.ts';
 
 /** Hook payload (Claude Code hook stdin JSON) → session status. Spec §13. */
@@ -28,7 +28,7 @@ export function ingest(ctx: Ctx, session: string, machine: string, body: unknown
   if (existing && existing.machine !== machine) return 403; // a machine may only report its own sessions
   if (!existing) {
     if (!ctx.cfg.machines.some((m) => m.id === machine)) return 404;
-    ctx.db.upsertSession({ name: session, machine, project: session.slice(3).replace(/-[^-]+$/, ''), status: 'idle', remote_control: 0 });
+    ctx.db.upsertSession({ name: session, machine, project: projectOf(ctx, session), status: 'idle', remote_control: 0 });
   }
   const before = ctx.db.session(session)!;
   const msg = (hook.message ?? hook.reason)?.slice(0, 500) ?? null;

@@ -18,6 +18,9 @@ import { machineToken } from '../src/auth.ts';
 const tmp = mkdtempSync(join(tmpdir(), 'orch-'));
 process.env.TMUX_TMPDIR = tmp; // private tmux server, inherited by every child process
 process.env.BRAIN_DIR = join(tmp, 'brain');
+process.env.CONFIG_DIR = join(tmp, 'config'); // project_create writes projects.yaml here
+mkdirSync(join(tmp, 'config'));
+writeFileSync(join(tmp, 'config', 'projects.yaml'), '# my projects\nprojects: []\n');
 process.env.PATH = `${join(tmp, 'bin')}:${process.env.PATH}`;
 mkdirSync(join(tmp, 'proj', 'demo'), { recursive: true });
 mkdirSync(join(tmp, 'bin'));
@@ -101,7 +104,7 @@ test('lists all tools', async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, ['agent_run', 'agent_status', 'events_pending', 'llm_list', 'llm_run', 'machine_list', 'machine_status',
     'memory_append', 'memory_delete', 'memory_link', 'memory_read', 'memory_search', 'memory_write', 'overview', 'project_context',
-    'session_approve', 'session_delete', 'session_interrupt', 'session_list', 'session_read', 'session_send', 'session_start', 'session_stop', 'session_wait']);
+    'project_sessions', 'session_approve', 'session_delete', 'session_interrupt', 'session_list', 'session_read', 'session_send', 'session_start', 'session_stop', 'session_wait']);
 });
 
 test('unreachable Mac fails fast with a speakable error', async () => {
@@ -158,11 +161,11 @@ test('session lifecycle over MCP + hooks', async () => {
   const start = await call('session_start', { project: 'the demo', prompt: "first 'task'", wait: 0 });
   assert.ok(!start.err, start.summary);
   const name: string = start.session;
-  assert.match(name, /^cc-demo-[0-9a-f]{4}$/);
+  assert.equal(name, 'cc-demo'); // named after the project
   await wait(300);
 
   let read = await call('session_read', { session: 'demo', mode: 'tail' });
-  assert.match(read.text, new RegExp(`args: --remote-control ${name} --session-id [0-9a-f-]{36} first 'task'`));
+  assert.match(read.text, new RegExp(`args: --name demo --remote-control demo --session-id [0-9a-f-]{36} first 'task'`));
 
   await call('session_send', { session: name, message: 'ask', wait: 0 });
   await wait(500);
@@ -381,4 +384,50 @@ test('session_delete stops, forgets, and optionally removes the transcript', asy
   assert.ok(!bulk.deleted.includes('cc-keep-me'));
   assert.ok(db.session('cc-keep-me'));
   await call('session_stop', { session: 'cc-keep-me', mode: 'kill', confirm: true });
+});
+
+test('new project: own folder and git repo, project-named sessions, shared history', async () => {
+  assert.match((await call('session_start', { project: 'Side Quest' })).summary, /Unknown project/);
+  const r = await call('session_start', { project: 'Side Quest', create: true, wait: 0 });
+  assert.ok(!r.err, r.summary);
+  assert.match(r.summary, /Created .*side-quest with a new git repo\. Started side-quest on node2 as cc-side-quest/);
+  const dir = join(tmp, 'proj', 'side-quest');
+  assert.ok(existsSync(join(dir, '.git')));
+  assert.match(readFileSync(join(tmp, 'config', 'projects.yaml'), 'utf8'), /^# my projects\nprojects:\n  - id: side-quest\n[\s\S]*Side Quest/);
+  assert.ok(cfg.projects.some((p) => p.id === 'side-quest'));
+
+  // A second concurrent session gets the next project-named slot; the spoken alias resolves too.
+  const r2 = await call('session_start', { project: 'side quest', wait: 0 });
+  assert.equal(r2.session, 'cc-side-quest-2');
+  await call('session_send', { session: 'cc-side-quest-2', message: 'refactor', wait: 10 });
+  await call('session_stop', { session: 'cc-side-quest-2', mode: 'kill', confirm: true });
+  // The ended session's exact reply lands in the log, and the next session's context carries it.
+  const log = readFileSync(join(tmp, 'brain', 'projects', 'side-quest', 'log.md'), 'utf8');
+  assert.match(log, /cc-side-quest-2[\s\S]*Claude session: [0-9a-f-]{36}[\s\S]*Done with refactor/);
+  const r3 = await call('session_start', { project: 'side-quest', wait: 0 });
+  assert.equal(r3.session, 'cc-side-quest-3'); // -2 is still tracked, so its history is not overwritten
+  assert.match(readFileSync(join(tmp, 'brain', 'projects', 'side-quest', 'context.md'), 'utf8'), /## Recent sessions[\s\S]*Done with refactor/);
+
+  const hist = await call('project_sessions', { project: 'side quest' });
+  assert.match(hist.summary, /side-quest has had 3 sessions, 2 running/);
+  assert.deepEqual(hist.sessions.map((s: { name: string }) => s.name).sort(), ['cc-side-quest', 'cc-side-quest-2', 'cc-side-quest-3']);
+  assert.ok(hist.sessions.every((s: { claude_session_id: string }) => /^[0-9a-f-]{36}$/.test(s.claude_session_id)));
+
+  // create=true on a folder nested in another repo still gives the project its own repo.
+  execSync(`git init -q ${join(tmp, 'proj')}`);
+  mkdirSync(join(tmp, 'proj', 'nested'));
+  const n = await call('session_start', { project: 'nested', create: true, wait: 0 });
+  assert.match(n.summary, /new git repo/);
+  assert.ok(existsSync(join(tmp, 'proj', 'nested', '.git')));
+
+  // A known repo is cloned when the folder is missing.
+  const src = join(tmp, 'src-repo');
+  execSync(`git init -q ${src} && git -C ${src} -c user.name=t -c user.email=t@t commit -q --allow-empty -m init`);
+  const c = await call('session_start', { project: 'cloned', create: true, repo: src, wait: 0 });
+  assert.match(c.summary, /Cloned /);
+  assert.ok(existsSync(join(tmp, 'proj', 'cloned', '.git')));
+  assert.ok((await call('session_start', { project: 'evil', create: true, repo: '--upload-pack=touch /tmp/x', wait: 0 })).err);
+  assert.ok(!cfg.projects.some((p) => p.id === 'evil')); // failed setup registers nothing
+
+  for (const s of ['cc-side-quest', 'cc-side-quest-3', 'cc-nested', 'cc-cloned']) await call('session_stop', { session: s, mode: 'kill', confirm: true });
 });

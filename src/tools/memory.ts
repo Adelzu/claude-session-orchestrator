@@ -11,7 +11,7 @@ import { q, qpath, runOk } from '../transport/ssh.ts';
 import { tool, type Ctx } from './common.ts';
 
 const exec = promisify(execFile);
-const MAX_FILE = 20_000, MAX_CONTEXT = 100_000;
+const MAX_FILE = 20_000, MAX_CONTEXT = 100_000, RECENT_SESSIONS = 8;
 
 export const brainDir = () => resolve((process.env.BRAIN_DIR ?? '~/brain').replace(/^~(?=$|\/)/, homedir()));
 /** Where the brain lives on the other machines (synced there by git or Syncthing). */
@@ -105,6 +105,10 @@ export function projectContext(ctx: Ctx, pid: string, dir = brainDir()) {
     `## Project notes\n\n${notes.map(section).join('\n') || '(none yet)\n'}\n` +
     `## Shared knowledge\n\n${shared.map(section).join('\n') || '(nothing linked)\n'}\n` +
     `## Skills\n\nRelated: ${related.join(', ') || 'none'}. All shared skills: ${skills.join(', ') || 'none'}.\n`;
+  // What earlier sessions on this project did (any machine), so a new session picks up where they left off.
+  const log = join(dir, 'projects', p.id, 'log.md');
+  const recent = existsSync(log) ? readFileSync(log, 'utf8').split(/\n(?=## )/).slice(1).slice(-RECENT_SESSIONS) : [];
+  md += `\n## Recent sessions\n\n${recent.join('\n').trim() || '(none yet)'}\n`;
   if (md.length > MAX_CONTEXT) md = md.slice(0, MAX_CONTEXT) + '\n… (context truncated)\n';
   return { markdown: md, notes: notes.map((f) => relative(dir, f)), shared: shared.map((f) => relative(dir, f)), related_skills: related };
 }

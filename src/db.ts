@@ -12,6 +12,7 @@ export interface SessionRow {
   last_message: string | null;
   claude_id: string | null;   // Claude Code session id (we pass --session-id, or a hook reports it)
   transcript: string | null;  // transcript path reported by a hook
+  created: number | null;     // when the session started (null for rows from before this column)
 }
 
 export class Db {
@@ -35,7 +36,7 @@ export class Db {
         args TEXT NOT NULL, ok INTEGER NOT NULL, error TEXT);
     `);
     // Columns added after the first release; ALTER fails harmlessly when they already exist.
-    for (const col of ['claude_id TEXT', 'transcript TEXT']) {
+    for (const col of ['claude_id TEXT', 'transcript TEXT', 'created INTEGER']) {
       try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
     }
   }
@@ -51,11 +52,19 @@ export class Db {
       .run(claudeId, transcript, name);
   }
 
-  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript'>) {
-    this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET machine = excluded.machine, project = excluded.project,
-        status = excluded.status, remote_control = excluded.remote_control, status_since = excluded.status_since`)
-      .run(s.name, s.machine, s.project, s.status, s.remote_control, Date.now());
+  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript' | 'created'>) {
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, created)
+      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET machine = excluded.machine, project = excluded.project,
+        status = excluded.status, remote_control = excluded.remote_control, status_since = excluded.status_since,
+        created = excluded.created, claude_id = NULL, transcript = NULL`)
+      .run(s.name, s.machine, s.project, s.status, s.remote_control, now, now);
+  }
+
+  /** Every session ever tracked for a project, newest first. */
+  projectSessions(project: string) {
+    return this.db.prepare(`SELECT * FROM sessions WHERE project = ? ORDER BY COALESCE(created, status_since) DESC`)
+      .all(project) as unknown as SessionRow[];
   }
 
   setStatus(name: string, status: Status, message: string | null = null) {

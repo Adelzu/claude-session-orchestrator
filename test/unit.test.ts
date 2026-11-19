@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -140,4 +140,23 @@ test('lastTurn reads the latest turn from a Claude Code transcript', async () =>
   assert.equal(t.reply, 'Fixed the token check. Tests pass now.');
   assert.deepEqual(t.actions, ['Bash: npm test', 'Edit: src/login.ts']);
   assert.deepEqual(t.files, ['src/login.ts']);
+});
+
+test('both plugins ship the same skill', () => {
+  const skill = (dir: string) => readFileSync(join(dir, 'skills', 'manage-sessions', 'SKILL.md'), 'utf8');
+  assert.equal(skill('plugin-local'), skill('plugin'), 'copy plugin/skills/manage-sessions to plugin-local/skills/');
+});
+
+test('cli: init writes a loadable config with private tokens, install print gives a stdio command', () => {
+  const home = mkdtempSync(join(tmpdir(), 'cli-'));
+  const cli = (...args: string[]) => execFileSync(process.execPath, ['src/cli.ts', ...args], { env: { ...process.env, ORCH_HOME: home } }).toString();
+  assert.match(cli('init', '--machine', 'hub', '--projects-root', '~/code'), /created .*\.env/);
+  assert.match(cli('init'), /kept .*machines\.yaml/); // never overwrites
+  const cfg = loadConfig(home);
+  assert.equal(cfg.machines[0].id, 'hub');
+  assert.equal(cfg.machines[0].projects_root, '~/code');
+  assert.equal(statSync(join(home, '.env')).mode & 0o077, 0);
+  assert.match(readFileSync(join(home, '.env'), 'utf8'), /^EVENTS_TOKEN=[0-9a-f]{64}\nMCP_TOKEN=[0-9a-f]{64}\n$/);
+  const out = JSON.parse(cli('install', 'print'));
+  assert.deepEqual(out.mcpServers['session-orchestrator'].args.slice(-2), [join(process.cwd(), 'src', 'cli.ts'), 'stdio']);
 });

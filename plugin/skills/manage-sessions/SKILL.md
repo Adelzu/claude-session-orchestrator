@@ -13,6 +13,8 @@ The Session Orchestrator tools reach the user's own machines through their own a
 - **"How are my projects doing?"**: call `overview` and read its summary, then one line per session if the user wants more.
 - **"What did X say?" / "What is X doing?"**: call `session_read`. Its default mode returns the session's latest reply, the tools it used and the files it changed. Use mode `tail` only when the user asks to see raw output.
 - **"Start a session for X on Y, have it do Z"**: call `session_start` with the project, the machine if named, and the prompt. It waits for the first reply and returns it, so tell the user what the session answered.
+- **"Start a new project called X"**: call `session_start` with `create: true` (and `repo` if the user gives a git URL). It makes the project's own folder and git repo and registers it. Only use `create` when the user clearly means a new project, not for a name you failed to match.
+- **"What has X done so far?"**: call `project_sessions` for the list of its sessions; the brain's `projects/<id>/log.md` has what each ended session did.
 - **"Tell X to ..."**: call `session_send` with the user's words. It waits for the reply (up to `wait` seconds) and returns it in the same call.
 - **A long task**: if a result says the session is still working, call `session_wait` and relay the reply when it comes, instead of reading repeatedly.
 

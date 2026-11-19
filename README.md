@@ -26,7 +26,7 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
                                           └───── hooks POST /events (Bearer EVENTS_TOKEN) ─────┘
 ```
 
-## Tools (24)
+## Tools (25)
 
 | Tool | What it does |
 | --- | --- |
@@ -34,7 +34,7 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
 | `events_pending()` | Sessions waiting for your input or approval, oldest first |
 | `machine_list()` / `machine_status(machine)` | Reachability, session count, laptop power (AC or battery); CPU, RAM, disk, GPU/VRAM, link type, LLM endpoints |
 | `session_list(machine?)` | Status: `working`, `waiting_input`, `waiting_approval`, `idle` or `stopped` |
-| `session_start(project, machine?, prompt?, remote_control=true, name?)` | Refreshes the shared context, then starts Claude Code in tmux |
+| `session_start(project, machine?, prompt?, remote_control=true, name?, create?, repo?)` | Refreshes the shared context, then starts Claude Code in tmux in the project's own folder, named after the project (`cc-<project>`, then `cc-<project>-2`…). `create=true` registers a new project and gives it its own folder and git repo (or clones `repo`) |
 | `session_read(session, mode=reply\|summary\|tail)` | `reply` (default): the latest reply text, tools used and files changed, read from Claude Code's own transcript; or a short terminal status, or the cleaned terminal text |
 | `session_send(session, message, wait=45)` | Types a message, presses Enter, and waits for the reply in the same call |
 | `session_wait(session, seconds=60)` | Waits for a working session to finish its turn, then returns its reply |
@@ -43,14 +43,38 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
 | `session_delete(session \| all_stopped, delete_transcript?, confirm)` | Cleanup: stop if running and forget the session; optionally delete its Claude Code transcript |
 | `memory_search` / `memory_read` / `memory_write` / `memory_append` / `memory_delete` | The brain; every write is a git commit, and delete needs `confirm=true` |
 | `memory_link(project, shared_path)` / `project_context(project)` | Link shared knowledge to a project / get everything a session on that project should know |
+| `project_sessions(project)` | Every session the project has had, on any machine, with its Claude Code session id |
 | `llm_list()` / `llm_run(task, endpoint=auto, …)` | Local models with auto routing |
 | `agent_run(agent, task)` / `agent_status(job_id)` | Local agents (HTTP or CLI) as background jobs |
 
 Every result is JSON whose first field is a one-sentence `summary`, written for voice. Long diffs and logs are never dumped. Sessions can be named by project alias ("my app"), and every call goes into an audit log.
 
-## Quick start
+## Install
 
 Requirements: Node ≥ 24, plus `tmux`, `git` and Claude Code on each machine you want to manage. You also need key-only SSH from the hub to the other machines. `jq` is needed on each machine for the hook installer.
+
+### With the CLI (Claude Code, Codex, Cursor, any MCP client)
+
+```sh
+npx claude-session-orchestrator init                 # ~/.config/session-orchestrator: this machine, tokens (0600), empty projects.yaml
+npx claude-session-orchestrator install claude       # or: codex, cursor, print (JSON for any other MCP client)
+npx claude-session-orchestrator hooks local local    # status hooks; for another machine: hooks me@gpu gpu http://hub:8787
+npx claude-session-orchestrator serve                # keep running (systemd/launchd) so hooks can report status
+```
+
+`install` registers the server over stdio and copies the `manage-sessions` skill (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex). Add more machines to `~/.config/session-orchestrator/machines.yaml`; projects are added by `session_start create=true` or by hand. `npm i -g claude-session-orchestrator` gives you the `session-orchestrator` command without `npx`. Set `ORCH_HOME` to keep the config somewhere else.
+
+### As a plugin
+
+```
+/plugin marketplace add Nurhak/claude-session-orchestrator
+/plugin install session-orchestrator-local@session-orchestrator   # self-hosted, stdio; also loads in Codex and Cursor
+/plugin install session-orchestrator@session-orchestrator         # hosted connector, see Hosted mode
+```
+
+The self-hosted plugin still needs `init`, `hooks` and `serve` above, once.
+
+### From a checkout
 
 ```sh
 git clone https://github.com/Nurhak/claude-session-orchestrator && cd claude-session-orchestrator
@@ -87,14 +111,14 @@ Instead of exposing your own server, sign in to the hosted service with GitHub o
    ORCH_CLOUD_URL=wss://<service>/agent
    ORCH_AGENT_TOKEN=cso_...
    ```
-3. Run `npm start` as usual. The agent connects out (nothing listens publicly) and serves the same 24 tools to your signed-in account only.
+3. Run `npm start` as usual. The agent connects out (nothing listens publicly) and serves the same 25 tools to your signed-in account only.
 
 The hosted part, in `worker/`, is a Cloudflare Worker. It handles OAuth 2.1 with `@cloudflare/workers-oauth-provider`, runs a stateless `/mcp` endpoint, and keeps one Durable Object per user holding that user's agent connection. It stores no tool arguments, sessions, keys or notes. Those stay on your machine. See [worker/README.md](worker/README.md) to deploy your own.
 
 ## Configuration
 
 - `machines.yaml`: `id`, `ssh_host`, `user`, `os` (`linux` or `macos`), `projects_root`, `local: true` for the hub itself, and an optional `claude_cmd`.
-- `projects.yaml`: `id`, spoken `aliases`, default `machine`, `path`, and `shared` brain paths to always include.
+- `projects.yaml`: `id`, spoken `aliases`, default `machine`, `path`, optional `repo` (git URL, cloned when a machine lacks the folder), and `shared` brain paths to always include. `session_start create=true` appends new projects here.
 - `llm.yaml`: `endpoints` (`id`, `machine`, `url` including `/v1`, `model`, `ctx`, `requires_ac`), `routing.order`, and `agents` (`url` or `cmd`).
 - `.env`: `EVENTS_TOKEN`, `MCP_TOKEN`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `PORT`, `HOST`, `DB_PATH`, `CONFIG_DIR`, `BRAIN_DIR`, `REMOTE_BRAIN_DIR`, `BRAIN_PUSH`, `LLM_TIMEOUT_S`.
 
@@ -111,7 +135,7 @@ The hosted part, in `worker/`, is a Cloudflare Worker. It handles OAuth 2.1 with
   skills/<name>/            shared Claude Code skills; scripts/link-skills.sh symlinks them into ~/.claude/skills
 ```
 
-At `session_start`, `context.md` is rebuilt from the project's notes, its linked shared files and related skills. It is copied to the target machine, and the project's `CLAUDE.md` gets `@…/context.md` once. On a project's first start, Claude Code asks "Allow external CLAUDE.md file imports?", and you can answer with `session_approve`.
+At `session_start`, `context.md` is rebuilt from the project's notes, its linked shared files, related skills and the last 8 entries of `log.md` (each ended session's last ask, reply, changed files and Claude Code session id), so a new session continues where the earlier ones left off, on any machine. It is copied to the target machine, and the project's `CLAUDE.md` gets `@…/context.md` once. On a project's first start, Claude Code asks "Allow external CLAUDE.md file imports?", and you can answer with `session_approve`.
 
 ## Security model
 

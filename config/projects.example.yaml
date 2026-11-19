@@ -3,6 +3,7 @@ projects:
     aliases: [my app]
     machine: gpu
     path: myapp         # relative to the machine's projects_root, or absolute/~
+    repo: git@github.com:me/myapp.git   # optional: cloned when a machine does not have the folder yet
     shared: [shared/deployment/expo]
   - id: website
     aliases: [web site]
