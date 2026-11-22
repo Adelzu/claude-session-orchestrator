@@ -2,6 +2,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,9 @@ import { machineToken } from '../src/auth.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), 'orch-'));
 process.env.TMUX_TMPDIR = tmp; // private tmux server, inherited by every child process
+// Inside tmux, $TMUX names the user's own socket and wins over TMUX_TMPDIR: drop it so the tests (and their kill-server) never touch it.
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
 process.env.BRAIN_DIR = join(tmp, 'brain');
 process.env.PATH = `${join(tmp, 'bin')}:${process.env.PATH}`;
 mkdirSync(join(tmp, 'proj', 'demo'), { recursive: true });
@@ -381,4 +385,71 @@ test('session_delete stops, forgets, and optionally removes the transcript', asy
   assert.ok(!bulk.deleted.includes('cc-keep-me'));
   assert.ok(db.session('cc-keep-me'));
   await call('session_stop', { session: 'cc-keep-me', mode: 'kill', confirm: true });
+});
+
+test('adopts Claude Code panes started outside the orchestrator (tmux, any session name)', async () => {
+  // node2 and mac are both local here and would see the same tmux server; scan only node2.
+  const all = cfg.machines;
+  cfg.machines = all.filter((m) => m.id === 'node2');
+  const sid = randomUUID();
+  const proj = join(tmp, 'proj', 'demo');
+  mkdirSync(join(tmp, 'elsewhere'), { recursive: true });
+  execSync(`tmux new-session -d -s mywork -c ${proj}/ '${FAKE} --session-id ${sid}'`);
+  execSync(`tmux new-session -d -s scratch -c ${join(tmp, 'elsewhere')} '${FAKE}'`);
+  execSync(`tmux new-session -d -s plain -c ${proj} 'cat'`); // not Claude Code: ignored
+  try {
+    await wait(300);
+    assert.equal(db.sessions().filter((r) => r.target).length, 0, 'no background scan');
+
+    const list = await call('session_list');
+    const adopted = list.sessions.filter((s: { adopted: boolean }) => s.adopted);
+    assert.equal(adopted.length, 2);
+    const a = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'mywork');
+    const u = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'scratch');
+    assert.equal(a.project, 'demo');
+    assert.match(a.name, /^cc-demo-[0-9a-f]{4}$/);
+    assert.equal(u.project, 'unassigned');
+    assert.match(list.summary, /unassigned \(tmux scratch\) on node2/);
+
+    assert.equal((await call('session_list')).sessions.filter((s: { adopted: boolean }) => s.adopted).length, 2, 'adopting twice does not duplicate');
+
+    // Works like a native session: send (exact reply from transcript via --session-id), read, approve, stop.
+    const r = await call('session_send', { session: a.name, message: 'hello' });
+    assert.ok(!r.err, r.summary);
+    assert.equal(r.reply, 'Done with hello. All good.');
+    assert.equal(r.done, true);
+    assert.equal(db.session(a.name)!.status, 'idle', 'no hooks: idle inferred from the pane');
+    assert.match((await call('session_read', { session: a.name, mode: 'tail' })).text, /Update\(src\/hello\.ts\)/);
+
+    await call('session_send', { session: u.name, message: 'ask', wait: 0 });
+    await wait(500);
+    const ap = await call('session_approve', { session: u.name, choice: 'yes', wait: 0 });
+    assert.ok(!ap.err, ap.summary);
+
+    assert.match((await call('session_stop', { session: u.name, mode: 'kill' })).summary, /needs confirm=true/);
+    assert.ok(!(await call('session_stop', { session: u.name, mode: 'kill', confirm: true })).err);
+    assert.equal(db.session(u.name)!.status, 'stopped');
+    assert.throws(() => execSync(`tmux has-session -t '=scratch'`, { stdio: 'ignore' })); // its only pane closed
+
+    // Claude exits to a shell: the session is stopped and nothing is typed into the shell.
+    execSync(`tmux respawn-pane -k -t '=mywork:' 'cat'`);
+    await wait(300);
+    const gone = await call('session_send', { session: a.name, message: 'INJECTED', wait: 0 });
+    assert.ok(gone.err);
+    assert.doesNotMatch(execSync(`tmux capture-pane -p -t '=mywork:'`).toString(), /INJECTED/);
+    assert.equal(db.session(a.name)!.status, 'stopped');
+    assert.ok(!(await call('session_delete', { session: a.name, confirm: true })).err);
+    execSync(`tmux has-session -t '=mywork'`); // deleting a stopped adopted session leaves the user's pane alone
+
+    // An unknown name triggers a scan, and the tmux session name works as a name.
+    execSync(`tmux respawn-pane -k -t '=mywork:' '${FAKE}'`);
+    await wait(300);
+    const t = await call('session_read', { session: 'mywork', mode: 'tail' });
+    assert.ok(!t.err, t.summary);
+    assert.equal(db.sessions().filter((r) => r.tmux_session === 'mywork' && r.status !== 'stopped').length, 1);
+    assert.ok((await call('session_read', { session: 'no-such-thing' })).err);
+  } finally {
+    cfg.machines = all;
+    for (const s of ['mywork', 'scratch', 'plain']) execSync(`tmux kill-session -t '=${s}' 2>/dev/null || true`);
+  }
 });
