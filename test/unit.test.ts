@@ -65,6 +65,19 @@ test('menuKeys picks the right option in numbered and unnumbered menus', () => {
   assert.equal(menuKeys('plain output', 'yes'), null);
 });
 
+// Only the "Yes, I trust this folder" label is confirmed against Claude Code 2.1.330; the rest is a plausible layout.
+const TRUST_DIALOG = `  Quick safety check: is this a project you created or one you trust?
+  ❯ 1. Yes, I trust this folder
+    2. No, exit
+  Enter to confirm · Esc to cancel`;
+
+test('trust-folder dialog is an approval prompt that session_approve can answer', () => {
+  assert.equal(detectStatus(TRUST_DIALOG), 'waiting_approval');
+  assert.equal(detectStatus(TRUST_DIALOG.replace('❯', ' ')), 'waiting_approval'); // cursor glyph not needed to detect it
+  assert.deepEqual(menuKeys(TRUST_DIALOG, 'yes'), ['1']);
+  assert.deepEqual(menuKeys(TRUST_DIALOG, 'no'), ['2']);
+});
+
 test('tail collapses long diffs', () => {
   const diff = Array.from({ length: 20 }, (_, i) => `  ${i} + line`).join('\n');
   const t = tail(diff, 100);
