@@ -165,6 +165,14 @@ test('session lifecycle over MCP + hooks', async () => {
   assert.match(name, /^cc-demo-[0-9a-f]{4}$/);
   await wait(300);
 
+  // The tmux server must not live in our own cgroup, or restarting the orchestrator service would kill it.
+  let scoped = true;
+  try { execSync('systemd-run --user --scope --quiet true', { stdio: 'ignore' }); } catch { scoped = false; }
+  if (scoped) {
+    const cg = (pid: string | number) => readFileSync(`/proc/${pid}/cgroup`, 'utf8');
+    assert.notEqual(cg(execSync("tmux display -p '#{pid}'").toString().trim()), cg(process.pid));
+  }
+
   let read = await call('session_read', { session: 'demo', mode: 'tail' });
   assert.match(read.text, new RegExp(`args: --remote-control ${name} --session-id [0-9a-f-]{36} first 'task'`));
 

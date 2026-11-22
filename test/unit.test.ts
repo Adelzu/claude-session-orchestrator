@@ -10,7 +10,7 @@ import { statusFor } from '../src/tools/events.ts';
 import { parseKv } from '../src/tools/machines.ts';
 import { findProject, loadConfig, type Config, type Machine } from '../src/config.ts';
 import { matchProject } from '../src/adopt.ts';
-import { isClaudeArgs, parseDiscovery } from '../src/tmux.ts';
+import { isClaudeArgs, newSessionCmd, parseDiscovery } from '../src/tmux.ts';
 
 test('q() survives quotes and shell metacharacters', () => {
   const nasty = `it's "x" $(rm -rf /) \`id\` ; | &`;
@@ -76,6 +76,13 @@ test('trust-folder dialog is an approval prompt that session_approve can answer'
   assert.equal(detectStatus(TRUST_DIALOG.replace('❯', ' ')), 'waiting_approval'); // cursor glyph not needed to detect it
   assert.deepEqual(menuKeys(TRUST_DIALOG, 'yes'), ['1']);
   assert.deepEqual(menuKeys(TRUST_DIALOG, 'no'), ['2']);
+});
+
+test('newSessionCmd: default tmux socket, own systemd scope only when no server runs', () => {
+  const c = newSessionCmd('cc-x-1', '~/p', "it's");
+  assert.match(c, /^if tmux list-sessions >\/dev\/null 2>&1; then tmux new-session -d -s 'cc-x-1' -c "\$HOME"'\/p' 'it'\\''s'; else systemd-run --user --scope --quiet tmux new-session /);
+  assert.match(c, /\|\| tmux new-session -d -s 'cc-x-1'[^;]*; fi$/);
+  assert.doesNotMatch(c, /\s-[LS]\s/); // no custom socket
 });
 
 test('tail collapses long diffs', () => {
