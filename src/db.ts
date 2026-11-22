@@ -12,6 +12,8 @@ export interface SessionRow {
   last_message: string | null;
   claude_id: string | null;   // Claude Code session id (we pass --session-id, or a hook reports it)
   transcript: string | null;  // transcript path reported by a hook
+  target: string | null;      // adopted sessions: tmux pane id (%N) running Claude Code; null for native ones
+  tmux_session: string | null; // adopted sessions: the user's own tmux session name
 }
 
 export class Db {
@@ -35,7 +37,7 @@ export class Db {
         args TEXT NOT NULL, ok INTEGER NOT NULL, error TEXT);
     `);
     // Columns added after the first release; ALTER fails harmlessly when they already exist.
-    for (const col of ['claude_id TEXT', 'transcript TEXT']) {
+    for (const col of ['claude_id TEXT', 'transcript TEXT', 'target TEXT', 'tmux_session TEXT']) {
       try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
     }
   }
@@ -51,7 +53,14 @@ export class Db {
       .run(claudeId, transcript, name);
   }
 
-  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript'>) {
+  /** Track a Claude Code pane that was started outside the orchestrator. */
+  adoptSession(s: { name: string; machine: string; project: string; status: Status; target: string; tmux_session: string; claude_id: string | null }) {
+    this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, claude_id, target, tmux_session)
+      VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`)
+      .run(s.name, s.machine, s.project, s.status, Date.now(), s.claude_id, s.target, s.tmux_session);
+  }
+
+  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript' | 'target' | 'tmux_session'>) {
     this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET machine = excluded.machine, project = excluded.project,
         status = excluded.status, remote_control = excluded.remote_control, status_since = excluded.status_since`)

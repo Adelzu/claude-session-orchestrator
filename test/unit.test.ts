@@ -8,7 +8,9 @@ import { q, qpath } from '../src/transport/ssh.ts';
 import { clean, detectStatus, menuKeys, summarize, tail } from '../src/summarize.ts';
 import { statusFor } from '../src/tools/events.ts';
 import { parseKv } from '../src/tools/machines.ts';
-import { findProject, loadConfig } from '../src/config.ts';
+import { findProject, loadConfig, type Config, type Machine } from '../src/config.ts';
+import { matchProject } from '../src/adopt.ts';
+import { isClaudeArgs, parseDiscovery } from '../src/tmux.ts';
 
 test('q() survives quotes and shell metacharacters', () => {
   const nasty = `it's "x" $(rm -rf /) \`id\` ; | &`;
@@ -140,4 +142,58 @@ test('lastTurn reads the latest turn from a Claude Code transcript', async () =>
   assert.equal(t.reply, 'Fixed the token check. Tests pass now.');
   assert.deepEqual(t.actions, ['Bash: npm test', 'Edit: src/login.ts']);
   assert.deepEqual(t.files, ['src/login.ts']);
+});
+
+test('isClaudeArgs: interactive Claude Code only', () => {
+  const n = ['claude'];
+  assert.ok(isClaudeArgs('claude --remote-control x', n));
+  assert.ok(isClaudeArgs('/home/u/.local/bin/claude', n));
+  assert.ok(isClaudeArgs('node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js', n));
+  assert.ok(isClaudeArgs('/bin/sh /opt/bin/fake-claude --session-id x', ['claude', 'fake-claude']));
+  assert.ok(!isClaudeArgs('claude -p summarize', n));
+  assert.ok(!isClaudeArgs('claude --print hi', n));
+  assert.ok(!isClaudeArgs('vim claude', n));
+  assert.ok(!isClaudeArgs('bash', n));
+  assert.ok(!isClaudeArgs('tail -f claude.log', n));
+});
+
+const MARK = '@@cc-test@@';
+const ID = '0f1e2d3c-4b5a-4968-8776-655443322110';
+const DISCOVERY = [
+  `${MARK} home /home/u`, `${MARK} ps`,
+  '  100     1 -bash', '  101   100 claude --resume ' + ID, '  102   101 node mcp-server.js',
+  '  200     1 -bash', '  201   200 vim notes.txt',
+  '  300     1 -bash', '  301   300 claude -p one-shot',
+  `${MARK} panes`,
+  '%1\t100\t1700000000\twork\t/home/u/projects/app/src',
+  '%2\t200\t1700000000\twork\t/home/u',
+  '%3\t300\t1700000000\tbatch\t/tmp',
+  `${MARK} cap %1`, '✻ Thinking… (esc to interrupt)',
+  `${MARK} cap %2`, '$ ',
+].join('\n') + '\n';
+
+test('parseDiscovery keeps only panes with Claude Code in their process tree', () => {
+  const d = parseDiscovery(DISCOVERY, MARK, ['claude']);
+  assert.equal(d.home, '/home/u');
+  assert.equal(d.panes.length, 1);
+  assert.deepEqual({ ...d.panes[0], pane: undefined }, {
+    id: '%1', session: 'work', cwd: '/home/u/projects/app/src', activity: 1700000000_000, pane: undefined, claude_id: ID,
+  });
+  assert.match(d.panes[0].pane, /esc to interrupt/);
+  assert.deepEqual(parseDiscovery(DISCOVERY.replaceAll(MARK, '@@other@@'), MARK, ['claude']).panes, []); // wrong marker: nothing forged
+});
+
+test('matchProject: longest folder wins, subfolders match, otherwise null', () => {
+  const m = { id: 'gpu', projects_root: '~/projects' } as Machine;
+  const cfg = { projects: [
+    { id: 'app', aliases: [], machine: 'gpu', shared: [] },
+    { id: 'app-api', aliases: [], machine: 'gpu', path: 'app/api', shared: [] },
+    { id: 'abs', aliases: [], machine: 'gpu', path: '/srv/abs', shared: [] },
+  ] } as unknown as Config;
+  assert.equal(matchProject(cfg, m, '/home/u', '/home/u/projects/app'), 'app');
+  assert.equal(matchProject(cfg, m, '/home/u', '/home/u/projects/app/src/'), 'app');
+  assert.equal(matchProject(cfg, m, '/home/u', '/home/u/projects/app/api/v1'), 'app-api');
+  assert.equal(matchProject(cfg, m, '/home/u', '/home/u/projects/application'), null);
+  assert.equal(matchProject(cfg, m, '/home/u', '/srv/abs'), 'abs');
+  assert.equal(matchProject(cfg, m, '', '/home/u/projects/app'), null); // unknown $HOME: cannot resolve ~
 });
