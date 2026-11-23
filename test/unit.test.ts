@@ -9,7 +9,7 @@ import { clean, detectStatus, menuKeys, summarize, tail } from '../src/summarize
 import { statusFor } from '../src/tools/events.ts';
 import { parseKv } from '../src/tools/machines.ts';
 import { findProject, loadConfig, type Config, type Machine } from '../src/config.ts';
-import { adoptPanes, matchProject } from '../src/adopt.ts';
+import { adoptedName, adoptPanes, matchProject, type AdoptIo } from '../src/adopt.ts';
 import { Db } from '../src/db.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { isClaudeArgs, newSessionCmd, parseDiscovery, RCVAL_SH, resolveRemoteControl } from '../src/tmux.ts';
@@ -256,54 +256,99 @@ test('parseDiscovery: --remote-control / --rc, realpaths and resolved folders', 
   assert.equal(d.dirs.get('~/webapp'), '/home/u/webapp');
 });
 
-test('adoptPanes: records the flag (unknown, not false) and re-matches unassigned rows (same row)', () => {
+/** A fake tmux server: renames update it, an existing name answers 'exists', and rescans see the new session names. */
+function fakeTmux(...existing: string[]) {
+  const set = new Set(existing), calls: string[] = [], renamed = new Map<string, string>();
+  const io: AdoptIo = { rename: async (from, to) => {
+    calls.push(`${from} -> ${to}`);
+    if (set.has(to)) return 'exists';
+    set.delete(from); set.add(to); renamed.set(from, to);
+    return 'ok';
+  } };
+  return { set, calls, renamed, io };
+}
+
+test('adoptPanes: records the flag (unknown, not false) and re-matches unassigned rows (same row)', async () => {
   const m = { id: 'hub', projects_root: '~' } as Machine;
   const db = new Db(':memory:');
+  const t = fakeTmux();
   const pane = { id: '%1', session: 'mine', cwd: '/home/u/webapp', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: -1 };
   const found = { home: '', panes: [pane], dirs: new Map<string, string>() };
-  assert.equal(adoptPanes(cfgOf(), db, m, found).length, 1);
+  assert.equal((await adoptPanes(cfgOf(), db, m, found, t.io)).length, 1);
   let row = db.sessions()[0];
   assert.equal(row.project, 'unassigned');
   assert.equal(row.remote_control, -1);
   const cfg = cfgOf({ id: 'webapp', machine: 'hub', path: 'webapp' });
-  assert.equal(adoptPanes(cfg, db, m, found).length, 0); // still no home and no resolved folder
+  const again = { ...found, panes: [{ ...pane, session: 'cc-mine' }] }; // tmux session was renamed by the first scan
+  assert.equal((await adoptPanes(cfg, db, m, again, t.io)).length, 0); // still no home and no resolved folder
   assert.equal(db.sessions()[0].project, 'unassigned');
-  found.dirs.set('~/webapp', '/home/u/webapp'); // machine resolved the folder
-  assert.equal(adoptPanes(cfg, db, m, found).length, 0, 'no duplicate');
+  again.dirs.set('~/webapp', '/home/u/webapp'); // machine resolved the folder
+  assert.equal((await adoptPanes(cfg, db, m, again, t.io)).length, 0, 'no duplicate');
   row = db.sessions()[0];
   assert.equal(row.project, 'webapp');
-  adoptPanes(cfg, db, m, { ...found, panes: [{ ...pane, id: '%2', remote_control: 1 }] });
+  await adoptPanes(cfg, db, m, { ...again, panes: [{ ...pane, id: '%2', session: 'other', remote_control: 1 }] }, t.io);
   assert.equal(db.sessions().find((r) => r.target === '%2')!.remote_control, 1);
 });
 
 // ---- one row per session, however often or however concurrently we scan ----
 const hubM = { id: 'hub', projects_root: '~' } as Machine;
 const paneOf = (o: object = {}) => ({ id: '%1', session: 'mine', cwd: '/x', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: -1, ...o });
-const scan = (db: Db, ...panes: object[]) => adoptPanes(cfgOf(), db, hubM, { home: '/h', panes: panes.map(paneOf), dirs: new Map() });
+type Tmux = ReturnType<typeof fakeTmux>;
+// Panes are given with the tmux name they were first seen under; a rescan sees the name after any rename.
+const scan = (db: Db, t: Tmux, ...panes: object[]) => adoptPanes(cfgOf(), db, hubM, {
+  home: '/h', dirs: new Map(), panes: panes.map((o) => { const p = paneOf(o); return { ...p, session: t.renamed.get(p.session) ?? p.session }; }),
+}, t.io);
 const tmpDb = () => join(mkdtempSync(join(tmpdir(), 'orch-db-')), 'o.db');
 
-test('adopt: scanning twice yields one row', () => {
-  const db = new Db(':memory:');
-  assert.equal(scan(db, {}).length, 1);
-  assert.equal(scan(db, {}).length, 0);
-  assert.equal(scan(db, {}).length, 0);
+test('adopt: scanning twice yields one row', async () => {
+  const db = new Db(':memory:'), t = fakeTmux('mine');
+  assert.equal((await scan(db, t, {})).length, 1);
+  assert.equal((await scan(db, t, {})).length, 0);
+  assert.equal((await scan(db, t, {})).length, 0);
   assert.equal(db.sessions().length, 1);
+  assert.equal(t.calls.length, 1, 'renamed once');
 });
 
-test('adopt: sessions the orchestrator started are never adopted', () => {
-  const db = new Db(':memory:');
+test('adopt: a non-cc tmux session is renamed to cc-<name> and the row takes that name', async () => {
+  const db = new Db(':memory:'), t = fakeTmux('webapp-monitoring');
+  assert.deepEqual(await scan(db, t, { session: 'webapp-monitoring', id: '%4' }), ['cc-webapp-monitoring']);
+  assert.deepEqual(t.calls, ['webapp-monitoring -> cc-webapp-monitoring']);
+  const r = db.sessions()[0];
+  assert.equal(r.name, 'cc-webapp-monitoring');
+  assert.equal(r.tmux_session, 'cc-webapp-monitoring');
+  assert.equal(r.tmux_orig, 'webapp-monitoring');
+  assert.equal(r.target, '%4'); // identity is still machine + pane
+  assert.equal(adoptedName('My Work_2'), 'cc-my-work-2');
+  assert.equal(adoptedName('!!'), 'cc-session');
+});
+
+test('adopt: a name clash gets a numeric suffix (tmux session, or an existing row)', async () => {
+  const db = new Db(':memory:'), t = fakeTmux('work', 'cc-work'); // tmux already has cc-work, which we were not told about
+  assert.deepEqual(await scan(db, t, { session: 'work' }), ['cc-work-2']);
+  assert.deepEqual(t.calls, ['work -> cc-work', 'work -> cc-work-2']);
+  assert.equal(db.sessions()[0].tmux_session, 'cc-work-2');
+  // A row (orchestrator session, stopped or not) that already has the name is skipped without asking tmux.
+  db.upsertSession({ name: 'cc-docs', machine: 'hub', project: 'docs', status: 'stopped', remote_control: 1 });
+  const t2 = fakeTmux('docs');
+  assert.deepEqual(await scan(db, t2, { session: 'docs', id: '%9' }), ['cc-docs-2']);
+  assert.deepEqual(t2.calls, ['docs -> cc-docs-2']);
+});
+
+test('adopt: sessions the orchestrator started are never adopted', async () => {
+  const db = new Db(':memory:'), t = fakeTmux('renamed-by-user');
   db.upsertSession({ name: 'cc-app-ab12', machine: 'hub', project: 'app', status: 'working', remote_control: 1 });
   db.setTranscript('cc-app-ab12', ID, null);
-  assert.equal(scan(db, { id: '%5', session: 'cc-app-ab12' }).length, 0); // its own tmux session
-  assert.equal(scan(db, { id: '%6', session: 'renamed-by-user', claude_id: ID }).length, 0); // renamed, same Claude session id
+  assert.equal((await scan(db, t, { id: '%5', session: 'cc-app-ab12' })).length, 0); // its own tmux session
+  assert.equal((await scan(db, t, { id: '%6', session: 'renamed-by-user', claude_id: ID })).length, 0); // renamed, same Claude session id
   assert.equal(db.sessions().length, 1);
+  assert.deepEqual(t.calls, [], 'their tmux sessions are left alone');
 });
 
-test('adopt: two concurrent scans (separate connections, stale snapshots) yield one row', () => {
+test('adopt: two concurrent scans (separate connections, stale snapshots) yield one row', async () => {
   const path = tmpDb();
   const a = new Db(path), b = new Db(path);
-  assert.equal(scan(a, {}).length, 1);
-  assert.equal(scan(b, {}).length, 0); // b sees a's row
+  assert.equal((await scan(a, fakeTmux('mine'), {})).length, 1);
+  assert.equal((await scan(b, fakeTmux('mine'), {})).length, 0); // b sees a's row
   // Both inserted before either saw the other: the unique index + upsert still leave one row.
   const raw = (db: Db) => db.adoptSession({ name: `cc-unassigned-${Math.random().toString(16).slice(2, 6)}`, machine: 'hub', project: 'unassigned', status: 'idle', target: '%1', tmux_session: 'mine', claude_id: null, claude_pid: 7, remote_control: -1 });
   raw(a); raw(b);
@@ -311,24 +356,93 @@ test('adopt: two concurrent scans (separate connections, stale snapshots) yield 
   assert.equal(b.sessions().length, 1);
 });
 
-test('adopt: renamed tmux session, restarted claude and stopped-then-running keep one row', () => {
-  const db = new Db(':memory:');
-  scan(db, {});
+test('adopt: renamed tmux session, restarted claude and stopped-then-running keep one row', async () => {
+  const db = new Db(':memory:'), t = fakeTmux('mine', 'renamed');
+  await scan(db, t, {});
   const name = db.sessions()[0].name;
+  assert.equal(name, 'cc-mine');
   db.setTranscript(name, null, '/t/old.jsonl');
-  scan(db, { session: 'renamed' });
+  await scan(db, t, { session: 'cc-renamed' }); // the user renamed the tmux session again
   assert.equal(db.sessions().length, 1);
-  assert.equal(db.sessions()[0].tmux_session, 'renamed');
+  assert.equal(db.sessions()[0].tmux_session, 'cc-renamed');
+  assert.equal(db.sessions()[0].name, 'cc-renamed', 'row name follows the tmux name');
   assert.equal(db.sessions()[0].transcript, '/t/old.jsonl'); // same process: transcript kept
-  scan(db, { session: 'renamed', claude_pid: 99 }); // claude restarted in the same pane
+  await scan(db, t, { session: 'cc-renamed', claude_pid: 99 }); // claude restarted in the same pane
   assert.equal(db.sessions().length, 1);
   assert.equal(db.sessions()[0].claude_pid, 99);
   assert.equal(db.sessions()[0].transcript, null); // new process: stale transcript dropped
-  db.setStatus(name, 'stopped');
-  assert.equal(scan(db, { session: 'renamed', claude_pid: 99 }).length, 0);
+  db.setStatus('cc-renamed', 'stopped');
+  assert.equal((await scan(db, t, { session: 'cc-renamed', claude_pid: 99 })).length, 0);
   assert.equal(db.sessions().length, 1);
-  assert.equal(db.sessions()[0].name, name);
+  assert.equal(db.sessions()[0].name, 'cc-renamed');
   assert.notEqual(db.sessions()[0].status, 'stopped'); // revived, not duplicated
+});
+
+test('adopt: an already adopted row is migrated to the cc-<name> naming on the next scan', async () => {
+  const db = new Db(':memory:'), t = fakeTmux('webapp-monitoring');
+  db.adoptSession({ name: 'cc-unassigned-0a1b', machine: 'hub', project: 'webapp', status: 'idle', target: '%1', tmux_session: 'webapp-monitoring', claude_id: null, claude_pid: 7, remote_control: 1 });
+  db.addEvent('cc-unassigned-0a1b', 'Stop', 'idle', null);
+  assert.deepEqual(await scan(db, t, { session: 'webapp-monitoring' }), [], 'not a new session');
+  const rows = db.sessions();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, 'cc-webapp-monitoring');
+  assert.equal(rows[0].project, 'webapp', 'project is not part of the name and is kept');
+  assert.equal(rows[0].tmux_orig, 'webapp-monitoring');
+  assert.equal(rows[0].remote_control, 1);
+  assert.equal((db.db.prepare(`SELECT COUNT(*) n FROM events WHERE session = 'cc-webapp-monitoring'`).get() as { n: number }).n, 1, 'history follows the rename');
+  await scan(db, t, { session: 'webapp-monitoring' });
+  assert.equal(db.sessions().length, 1, 'rescan after the rename: still one row');
+  assert.equal(t.calls.length, 1);
+});
+
+test('adopt: several Claude panes in one tmux session: renamed once, first pane has the session name', async () => {
+  const db = new Db(':memory:'), t = fakeTmux('dev');
+  assert.deepEqual(await scan(db, t, { id: '%12', session: 'dev' }, { id: '%3', session: 'dev', claude_pid: 8 }), ['cc-dev', 'cc-dev-p12']);
+  assert.deepEqual(t.calls, ['dev -> cc-dev'], 'one rename');
+  const by = (id: string) => db.adoptedRow('hub', id)!;
+  assert.equal(by('%3').name, 'cc-dev');
+  assert.equal(by('%12').name, 'cc-dev-p12');
+  assert.equal(by('%12').tmux_session, 'cc-dev'); // both rows point at the same tmux session
+  await scan(db, t, { id: '%12', session: 'dev' }, { id: '%3', session: 'dev', claude_pid: 8 });
+  assert.equal(db.sessions().length, 2);
+  assert.equal(t.calls.length, 1);
+  // The first pane closes: the other keeps its name and the stopped row's name is not reused.
+  db.setStatus('cc-dev', 'stopped');
+  await scan(db, t, { id: '%12', session: 'dev' });
+  assert.deepEqual(db.sessions().map((r) => r.name).sort(), ['cc-dev', 'cc-dev-p12']);
+});
+
+test('adopt: a failed tmux rename keeps working and is retried on the next scan', async () => {
+  const db = new Db(':memory:');
+  let fail = true; const calls: string[] = [];
+  const io: AdoptIo = { rename: async (_f, to) => { calls.push(to); return fail ? 'failed' : 'ok'; } };
+  const run = (session: string) => adoptPanes(cfgOf(), db, hubM, { home: '/h', dirs: new Map(), panes: [paneOf({ session })] }, io);
+  assert.equal((await run('mine')).length, 1);
+  assert.equal(db.sessions().length, 1);
+  fail = false;
+  assert.equal((await run('mine')).length, 0);
+  assert.deepEqual(calls, ['cc-mine', 'cc-mine']);
+  assert.equal(db.sessions().length, 1);
+  assert.equal(db.sessions()[0].tmux_orig, 'mine');
+});
+
+test('a hook event naming the renamed session (cc-<name>) lands on the adopted row, never a second one', async () => {
+  const { ingest } = await import('../src/tools/events.ts');
+  const db = new Db(':memory:'), t = fakeTmux('webapp-monitoring');
+  await scan(db, t, { session: 'webapp-monitoring' });
+  db.setStatus('cc-webapp-monitoring', 'working');
+  const ctx = { db, cfg: { machines: [hubM], projects: [] } } as never;
+  assert.equal(ingest(ctx, 'cc-webapp-monitoring', 'hub', { hook_event_name: 'Stop' }), 204);
+  assert.equal(db.sessions().length, 1);
+  assert.equal(db.session('cc-webapp-monitoring')!.status, 'idle');
+  assert.equal(db.session('cc-webapp-monitoring')!.target, '%1', 'still the adopted row');
+  // A hook that beat the rename (native row under the new name) is folded into the adopted row.
+  const db2 = new Db(':memory:');
+  db2.adoptSession({ name: 'cc-unassigned-1', machine: 'hub', project: 'webapp', status: 'idle', target: '%1', tmux_session: 'webapp', claude_id: null, claude_pid: 7, remote_control: 1 });
+  ingest({ db: db2, cfg: { machines: [hubM], projects: [] } } as never, 'cc-webapp', 'hub', { hook_event_name: 'Stop' });
+  assert.equal(db2.sessions().length, 2);
+  await scan(db2, fakeTmux('cc-webapp'), { session: 'cc-webapp' });
+  assert.deepEqual(db2.sessions().map((r) => [r.name, !!r.target]), [['cc-webapp', true]]);
 });
 
 test('Db startup removes duplicate adopted rows from earlier versions, keeping the oldest', () => {

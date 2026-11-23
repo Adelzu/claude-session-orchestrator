@@ -44,6 +44,13 @@ export const newSessionCmd = (name: string, dir: string, cmd: string) => {
   return `if tmux list-sessions >/dev/null 2>&1; then ${nw}; else systemd-run --user --scope --quiet ${nw} 2>/dev/null || ${nw}; fi`;
 };
 
+/** Rename a tmux session: 'exists' when another session already has that name. */
+export async function renameSession(m: Machine, from: string, to: string): Promise<'ok' | 'exists' | 'failed'> {
+  const r = await run(m, `tmux rename-session -t ${sess(from)} ${q(to)}`);
+  if (r.code === 0) return 'ok';
+  return /duplicate session/.test(r.stderr) ? 'exists' : 'failed';
+}
+
 export const newSession = (m: Machine, name: string, dir: string, cmd: string) => runOk(m, newSessionCmd(name, dir, cmd));
 
 /** Type literal text, then press Enter (separate call so text is never parsed as key names). */
