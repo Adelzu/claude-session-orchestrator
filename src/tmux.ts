@@ -22,7 +22,8 @@ const pane = (r: Ref) => q(typeof r === 'string' ? `=${r}:` : r.target && PANE_R
 export async function snapshot(m: Machine): Promise<TmuxSession[]> {
   // Fresh random marker per call, so text shown in a pane cannot forge another session's record.
   const mark = `@@cc-${randomBytes(12).toString('hex')}@@`;
-  const r = await run(m, `tmux list-sessions -F '#{session_name} #{session_activity}' 2>/dev/null | grep '^cc-' |
+  const r = await run(m, `{ tmux list-sessions -F '#{session_name} #{session_activity}'; tmux list-windows -a -F '#{session_name} #{window_activity}'; } 2>/dev/null |
+    awk '($2 + 0) > (m[$1] + 0) { m[$1] = $2 } END { for (s in m) print s, m[s] }' | sort | grep '^cc-' |
     while read -r s a; do echo "${mark} $s $a"; tmux capture-pane -p -J -t "=$s:" -S -30; done; true`);
   if (r.code === 255) throw unreachable(m);
   const seen = new Set<string>();
@@ -76,7 +77,7 @@ export interface ClaudePane {
   id: string;               // tmux pane id, e.g. %12
   session: string;          // tmux session name
   cwd: string;
-  activity: number;         // ms, last activity of the tmux session
+  activity: number;         // ms, newest of the tmux session's activity and the pane's window activity
   pane: string;             // last 30 lines
   claude_pid: number;       // the Claude Code process; changes when it restarts in the same pane
   claude_id: string | null; // from --session-id / --resume in the process args, if given
@@ -172,14 +173,14 @@ export function parseDiscovery(out: string, mark: string, names: string[]): Disc
   const found: ClaudePane[] = [];
   const seenIds = new Set<string>();
   for (const l of panes.split('\n')) {
-    const [id, pid, act, session, ...cwd] = l.split('\t');
+    const [id, pid, act, wact, session, ...cwd] = l.split('\t');
     if (!PANE_RE.test(id ?? '') || seenIds.has(id) || !session) continue;
     seenIds.add(id);
     const hit = claudeIn(Number(pid));
     if (hit === null) continue;
     const a = hit.args;
     found.push({
-      id, session, cwd: cwd.join('\t'), activity: Number(act) * 1000, pane: caps.get(id) ?? '',
+      id, session, cwd: cwd.join('\t'), activity: Math.max(Number(act) || 0, Number(wact) || 0) * 1000, pane: caps.get(id) ?? '',
       claude_pid: hit.pid, claude_id: a.match(CLAUDE_ID)?.[1] ?? null, remote_control: resolveRemoteControl(a, rcSet.get(id)),
       ...(realCwd.has(id) && { real_cwd: realCwd.get(id) }),
     });
@@ -202,7 +203,7 @@ export async function discover(m: Machine, dirs: string[] = []): Promise<Discove
     t='~/'; H=\${HOME:-$(cd ~ 2>/dev/null && pwd -P)}
     echo "${mark} home $H"; echo "${mark} ps"; ps -A -ww -o pid=,ppid=,args= 2>/dev/null
     echo "${mark} panes"
-    tmux list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{session_activity}\t#{session_name}\t#{pane_current_path}' 2>/dev/null
+    tmux list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{session_activity}\t#{window_activity}\t#{session_name}\t#{pane_current_path}' 2>/dev/null
     echo "${mark} real"
     tmux list-panes -a -F '#{pane_id}\t#{pane_current_path}' 2>/dev/null | while IFS="$(printf '\\t')" read -r p c; do printf '%s\\t%s\\n' "$p" "$(realpath -e -- "$c" 2>/dev/null)"; done
     echo "${mark} dirs"
