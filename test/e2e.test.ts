@@ -472,14 +472,36 @@ test('adopts Claude Code panes started outside the orchestrator (tmux, any sessi
     const list = await call('session_list');
     const adopted = list.sessions.filter((s: { adopted: boolean }) => s.adopted);
     assert.equal(adopted.length, 2);
-    const a = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'mywork');
-    const u = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'scratch');
+    // Their tmux sessions were renamed to cc-<name> (so the hooks report for them); the row name follows.
+    const a = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'cc-mywork');
+    const u = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'cc-scratch');
     assert.equal(a.project, 'demo');
-    assert.match(a.name, /^cc-demo-[0-9a-f]{4}$/);
+    assert.equal(a.name, 'cc-mywork'); // the project is not part of an adopted name
+    assert.equal(u.name, 'cc-scratch');
     assert.equal(u.project, 'unassigned');
-    assert.match(list.summary, /unassigned \(tmux scratch\) on node2/);
+    assert.match(list.summary, /unassigned \(tmux cc-scratch\) on node2/);
+    execSync(`tmux has-session -t '=cc-mywork'`);
+    assert.throws(() => execSync(`tmux has-session -t '=mywork'`, { stdio: 'ignore' }));
+    assert.equal(db.session('cc-mywork')!.tmux_orig, 'mywork');
 
-    assert.equal((await call('session_list')).sessions.filter((s: { adopted: boolean }) => s.adopted).length, 2, 'adopting twice does not duplicate');
+    // The renamed session shows up as a cc-* tmux session on the next scan: still one row, never a native duplicate.
+    for (let i = 0; i < 2; i++) {
+      const again = await call('session_list');
+      assert.equal(again.sessions.filter((s: { adopted: boolean }) => s.adopted).length, 2, 'adopting twice does not duplicate');
+      assert.equal(again.sessions.filter((s: { name: string }) => s.name === 'cc-mywork').length, 1);
+    }
+    assert.equal(db.sessions().filter((r) => r.name === 'cc-mywork' && !r.target).length, 0, 'no native row under the renamed name');
+
+    // notify.sh reports session=<tmux name>: that is the adopted row now.
+    const hook = (session: string, body: unknown) => fetch(`${base}/events?session=${session}&machine=node2`, {
+      method: 'POST', headers: { authorization: `Bearer ${machineToken('secret', 'node2')}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal((await hook('cc-mywork', { hook_event_name: 'Notification', message: 'Claude needs your permission to use Bash' })).status, 204);
+    assert.equal(db.session('cc-mywork')!.status, 'waiting_approval');
+    assert.ok(db.session('cc-mywork')!.target, 'still the adopted row');
+    assert.equal((await hook('cc-mywork', { hook_event_name: 'Stop' })).status, 204);
+    assert.equal(db.session('cc-mywork')!.status, 'idle');
+    assert.equal(db.sessions().filter((r) => r.name === 'cc-mywork').length, 1);
 
     // Works like a native session: send (exact reply from transcript via --session-id), read, approve, stop.
     const r = await call('session_send', { session: a.name, message: 'hello' });
@@ -497,27 +519,28 @@ test('adopts Claude Code panes started outside the orchestrator (tmux, any sessi
     assert.match((await call('session_stop', { session: u.name, mode: 'kill' })).summary, /needs confirm=true/);
     assert.ok(!(await call('session_stop', { session: u.name, mode: 'kill', confirm: true })).err);
     assert.equal(db.session(u.name)!.status, 'stopped');
-    assert.throws(() => execSync(`tmux has-session -t '=scratch'`, { stdio: 'ignore' })); // its only pane closed
+    assert.throws(() => execSync(`tmux has-session -t '=cc-scratch'`, { stdio: 'ignore' })); // its only pane closed
 
     // Claude exits to a shell: the session is stopped and nothing is typed into the shell.
-    execSync(`tmux respawn-pane -k -t '=mywork:' 'cat'`);
+    execSync(`tmux respawn-pane -k -t '=cc-mywork:' 'cat'`);
     await wait(300);
     const gone = await call('session_send', { session: a.name, message: 'INJECTED', wait: 0 });
     assert.ok(gone.err);
-    assert.doesNotMatch(execSync(`tmux capture-pane -p -t '=mywork:'`).toString(), /INJECTED/);
+    assert.doesNotMatch(execSync(`tmux capture-pane -p -t '=cc-mywork:'`).toString(), /INJECTED/);
     assert.equal(db.session(a.name)!.status, 'stopped');
     assert.ok(!(await call('session_delete', { session: a.name, confirm: true })).err);
-    execSync(`tmux has-session -t '=mywork'`); // deleting a stopped adopted session leaves the user's pane alone
+    execSync(`tmux has-session -t '=cc-mywork'`); // deleting a stopped adopted session leaves the user's pane alone
 
     // An unknown name triggers a scan, and the tmux session name works as a name.
-    execSync(`tmux respawn-pane -k -t '=mywork:' '${FAKE}'`);
+    execSync(`tmux respawn-pane -k -t '=cc-mywork:' '${FAKE}'`);
     await wait(300);
     const t = await call('session_read', { session: 'mywork', mode: 'tail' });
     assert.ok(!t.err, t.summary);
-    assert.equal(db.sessions().filter((r) => r.tmux_session === 'mywork' && r.status !== 'stopped').length, 1);
+    // Its row was deleted and its tmux session is cc-* now, so it is tracked by name like any cc-* session: one live row.
+    assert.equal(db.sessions().filter((r) => r.name === 'cc-mywork' && r.status !== 'stopped').length, 1);
     assert.ok((await call('session_read', { session: 'no-such-thing' })).err);
   } finally {
     cfg.machines = all;
-    for (const s of ['mywork', 'scratch', 'plain']) execSync(`tmux kill-session -t '=${s}' 2>/dev/null || true`);
+    for (const s of ['mywork', 'cc-mywork', 'scratch', 'cc-scratch', 'plain']) execSync(`tmux kill-session -t '=${s}' 2>/dev/null || true`);
   }
 });

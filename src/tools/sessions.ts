@@ -87,11 +87,15 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
   }));
   const out: LiveSession[] = [];
   for (const { m, live, found } of snaps) {
-    if (live && found && adopt) adoptPanes(ctx.cfg, ctx.db, m, found);
+    if (live && found && adopt) {
+      await adoptPanes(ctx.cfg, ctx.db, m, found, { rename: (from, to) => tmux.renameSession(m, from, to), taken: new Set(live.map((s) => s.name)) });
+    }
     const mine = ctx.db.sessions().filter((r) => r.machine === m.id);
     const rows = new Map(mine.filter((r) => !r.target).map((r) => [r.name, r]));
+    const adoptedNames = new Set(mine.filter((r) => r.target).map((r) => r.name));
     if (live) {
       for (const s of live) {
+        if (adoptedNames.has(s.name)) continue; // an adopted session renamed to cc-<name>: tracked by its pane below, never a second row
         const owner = ctx.db.session(s.name)?.machine;
         if (owner && owner !== m.id) continue; // same name already tracked on another machine
         if (!rows.has(s.name)) {
