@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -166,17 +166,23 @@ test('lastTurn reads the latest turn from a Claude Code transcript', async () =>
   assert.deepEqual(t.files, ['src/login.ts']);
 });
 
-test('isClaudeArgs: interactive Claude Code only', () => {
-  const n = ['claude'];
-  assert.ok(isClaudeArgs('claude --remote-control x', n));
-  assert.ok(isClaudeArgs('/home/u/.local/bin/claude', n));
-  assert.ok(isClaudeArgs('node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js', n));
-  assert.ok(isClaudeArgs('/bin/sh /opt/bin/fake-claude --session-id x', ['claude', 'fake-claude']));
-  assert.ok(!isClaudeArgs('claude -p summarize', n));
-  assert.ok(!isClaudeArgs('claude --print hi', n));
-  assert.ok(!isClaudeArgs('vim claude', n));
-  assert.ok(!isClaudeArgs('bash', n));
-  assert.ok(!isClaudeArgs('tail -f claude.log', n));
+test('both plugins ship the same skill', () => {
+  const skill = (dir: string) => readFileSync(join(dir, 'skills', 'manage-sessions', 'SKILL.md'), 'utf8');
+  assert.equal(skill('plugin-local'), skill('plugin'), 'copy plugin/skills/manage-sessions to plugin-local/skills/');
+});
+
+test('cli: init writes a loadable config with private tokens, install print gives a stdio command', () => {
+  const home = mkdtempSync(join(tmpdir(), 'cli-'));
+  const cli = (...args: string[]) => execFileSync(process.execPath, ['src/cli.ts', ...args], { env: { ...process.env, ORCH_HOME: home } }).toString();
+  assert.match(cli('init', '--machine', 'hub', '--projects-root', '~/code'), /created .*\.env/);
+  assert.match(cli('init'), /kept .*machines\.yaml/); // never overwrites
+  const cfg = loadConfig(home);
+  assert.equal(cfg.machines[0].id, 'hub');
+  assert.equal(cfg.machines[0].projects_root, '~/code');
+  assert.equal(statSync(join(home, '.env')).mode & 0o077, 0);
+  assert.match(readFileSync(join(home, '.env'), 'utf8'), /^EVENTS_TOKEN=[0-9a-f]{64}\nMCP_TOKEN=[0-9a-f]{64}\n$/);
+  const out = JSON.parse(cli('install', 'print'));
+  assert.deepEqual(out.mcpServers['session-orchestrator'].args.slice(-2), [join(process.cwd(), 'src', 'cli.ts'), 'stdio']);
 });
 
 const MARK = '@@cc-test@@';
@@ -224,17 +230,17 @@ const cfgOf = (...projects: object[]) => ({ projects: projects.map((p) => ({ ali
 
 test('matchProject: unknown $HOME falls back to the machine-resolved folder, else no match', () => {
   const m = { id: 'hub', projects_root: '~' } as Machine;
-  const cfg = cfgOf({ id: 'lockfy', machine: 'hub', path: 'lockfy' });
-  const dirs = new Map([['~/lockfy', '/home/u/lockfy']]);
-  assert.equal(matchProject(cfg, m, '', '/home/u/lockfy/src', { dirs }), 'lockfy');
-  assert.equal(matchProject(cfg, m, '', '/home/u/lockfy'), null); // nothing to resolve ~ with
+  const cfg = cfgOf({ id: 'webapp', machine: 'hub', path: 'webapp' });
+  const dirs = new Map([['~/webapp', '/home/u/webapp']]);
+  assert.equal(matchProject(cfg, m, '', '/home/u/webapp/src', { dirs }), 'webapp');
+  assert.equal(matchProject(cfg, m, '', '/home/u/webapp'), null); // nothing to resolve ~ with
 });
 
 test('matchProject: realpath on both sides (symlinked pane cwd or project folder)', () => {
   const m = { id: 'hub', projects_root: '~' } as Machine;
-  const cfg = cfgOf({ id: 'lockfy', machine: 'hub', path: 'lockfy' });
-  assert.equal(matchProject(cfg, m, '/home/u', '/work/link', { cwd: '/home/u/lockfy/api' }), 'lockfy'); // pane cwd is a symlink
-  assert.equal(matchProject(cfg, m, '/home/u', '/data/lockfy/x', { dirs: new Map([['~/lockfy', '/data/lockfy']]) }), 'lockfy'); // folder is a symlink
+  const cfg = cfgOf({ id: 'webapp', machine: 'hub', path: 'webapp' });
+  assert.equal(matchProject(cfg, m, '/home/u', '/work/link', { cwd: '/home/u/webapp/api' }), 'webapp'); // pane cwd is a symlink
+  assert.equal(matchProject(cfg, m, '/home/u', '/data/webapp/x', { dirs: new Map([['~/webapp', '/data/webapp']]) }), 'webapp'); // folder is a symlink
 });
 
 test('parseDiscovery: --remote-control / --rc, realpaths and resolved folders', () => {
@@ -242,30 +248,30 @@ test('parseDiscovery: --remote-control / --rc, realpaths and resolved folders', 
     `${MARK} home /home/u`, `${MARK} ps`,
     '  100     1 -bash', '  101   100 claude --rc', '  200     1 -bash', '  201   200 claude --remote-control my-name', '  300     1 -bash', '  301   300 claude',
     `${MARK} panes`, '%1\t100\t1\ta\t/x', '%2\t200\t1\tb\t/y', '%3\t300\t1\tc\t/z',
-    `${MARK} real`, '%1\t/real/x', `${MARK} dirs`, '~/lockfy\t/home/u/lockfy',
+    `${MARK} real`, '%1\t/real/x', `${MARK} dirs`, '~/webapp\t/home/u/webapp',
   ].join('\n') + '\n';
   const d = parseDiscovery(out, MARK, ['claude']);
   assert.deepEqual(d.panes.map((p) => p.remote_control), [1, 1, -1]);
   assert.deepEqual(d.panes.map((p) => p.real_cwd), ['/real/x', undefined, undefined]);
-  assert.equal(d.dirs.get('~/lockfy'), '/home/u/lockfy');
+  assert.equal(d.dirs.get('~/webapp'), '/home/u/webapp');
 });
 
 test('adoptPanes: records the flag (unknown, not false) and re-matches unassigned rows (same row)', () => {
   const m = { id: 'hub', projects_root: '~' } as Machine;
   const db = new Db(':memory:');
-  const pane = { id: '%1', session: 'mine', cwd: '/home/u/lockfy', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: -1 };
+  const pane = { id: '%1', session: 'mine', cwd: '/home/u/webapp', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: -1 };
   const found = { home: '', panes: [pane], dirs: new Map<string, string>() };
   assert.equal(adoptPanes(cfgOf(), db, m, found).length, 1);
   let row = db.sessions()[0];
   assert.equal(row.project, 'unassigned');
   assert.equal(row.remote_control, -1);
-  const cfg = cfgOf({ id: 'lockfy', machine: 'hub', path: 'lockfy' });
+  const cfg = cfgOf({ id: 'webapp', machine: 'hub', path: 'webapp' });
   assert.equal(adoptPanes(cfg, db, m, found).length, 0); // still no home and no resolved folder
   assert.equal(db.sessions()[0].project, 'unassigned');
-  found.dirs.set('~/lockfy', '/home/u/lockfy'); // machine resolved the folder
+  found.dirs.set('~/webapp', '/home/u/webapp'); // machine resolved the folder
   assert.equal(adoptPanes(cfg, db, m, found).length, 0, 'no duplicate');
   row = db.sessions()[0];
-  assert.equal(row.project, 'lockfy');
+  assert.equal(row.project, 'webapp');
   adoptPanes(cfg, db, m, { ...found, panes: [{ ...pane, id: '%2', remote_control: 1 }] });
   assert.equal(db.sessions().find((r) => r.target === '%2')!.remote_control, 1);
 });

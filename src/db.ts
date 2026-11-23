@@ -15,6 +15,7 @@ export interface SessionRow {
   last_message: string | null;
   claude_id: string | null;   // Claude Code session id (we pass --session-id, or a hook reports it)
   transcript: string | null;  // transcript path reported by a hook
+  created: number | null;     // when the session started (null for rows from before this column)
   target: string | null;      // adopted sessions: tmux pane id (%N) running Claude Code; null for native ones
   tmux_session: string | null; // adopted sessions: the user's own tmux session name
   claude_pid: number | null;   // adopted sessions: pid of the Claude Code process in the pane (changes when it restarts)
@@ -41,7 +42,7 @@ export class Db {
         args TEXT NOT NULL, ok INTEGER NOT NULL, error TEXT);
     `);
     // Columns added after the first release; ALTER fails harmlessly when they already exist.
-    for (const col of ['claude_id TEXT', 'transcript TEXT', 'target TEXT', 'tmux_session TEXT', 'claude_pid INTEGER']) {
+    for (const col of ['claude_id TEXT', 'transcript TEXT', 'created INTEGER', 'target TEXT', 'tmux_session TEXT', 'claude_pid INTEGER']) {
       try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
     }
     // One row per adopted pane: machine + tmux pane id. Duplicates from earlier versions go first
@@ -86,8 +87,9 @@ export class Db {
    * or a restarted Claude Code updates the existing row instead of adding another.
    */
   adoptSession(s: { name: string; machine: string; project: string; status: Status; target: string; tmux_session: string; claude_id: string | null; claude_pid: number | null; remote_control: number }) {
-    this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, claude_id, claude_pid, target, tmux_session)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, created, claude_id, claude_pid, target, tmux_session)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (machine, target) WHERE target IS NOT NULL DO UPDATE SET
         tmux_session = excluded.tmux_session,
         project = CASE WHEN sessions.project = 'unassigned' THEN excluded.project ELSE sessions.project END,
@@ -95,18 +97,26 @@ export class Db {
         claude_id = excluded.claude_id, claude_pid = excluded.claude_pid,
         status_since = CASE WHEN sessions.status = 'stopped' THEN excluded.status_since ELSE sessions.status_since END,
         status = CASE WHEN sessions.status = 'stopped' THEN excluded.status ELSE sessions.status END`)
-      .run(s.name, s.machine, s.project, s.status, s.remote_control, Date.now(), s.claude_id, s.claude_pid, s.target, s.tmux_session);
+      .run(s.name, s.machine, s.project, s.status, s.remote_control, now, now, s.claude_id, s.claude_pid, s.target, s.tmux_session);
   }
 
   setRemoteControl(name: string, value: number) {
     this.db.prepare(`UPDATE sessions SET remote_control = ? WHERE name = ?`).run(value, name);
   }
 
-  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript' | 'target' | 'tmux_session' | 'claude_pid'>) {
-    this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET machine = excluded.machine, project = excluded.project,
-        status = excluded.status, remote_control = excluded.remote_control, status_since = excluded.status_since`)
-      .run(s.name, s.machine, s.project, s.status, s.remote_control, Date.now());
+  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript' | 'created' | 'target' | 'tmux_session' | 'claude_pid'>) {
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, created)
+      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET machine = excluded.machine, project = excluded.project,
+        status = excluded.status, remote_control = excluded.remote_control, status_since = excluded.status_since,
+        created = excluded.created, claude_id = NULL, transcript = NULL`)
+      .run(s.name, s.machine, s.project, s.status, s.remote_control, now, now);
+  }
+
+  /** Every session ever tracked for a project, newest first. */
+  projectSessions(project: string) {
+    return this.db.prepare(`SELECT * FROM sessions WHERE project = ? ORDER BY COALESCE(created, status_since) DESC`)
+      .all(project) as unknown as SessionRow[];
   }
 
   setStatus(name: string, status: Status, message: string | null = null) {

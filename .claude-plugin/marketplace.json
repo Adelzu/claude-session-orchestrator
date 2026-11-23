@@ -10,6 +10,11 @@
       "name": "session-orchestrator",
       "source": "./plugin",
       "description": "Manage all your Claude Code sessions across your machines from one place, by chat or voice."
+    },
+    {
+      "name": "session-orchestrator-local",
+      "source": "./plugin-local",
+      "description": "Self-hosted: runs the orchestrator on your own machine over stdio. Works in Claude Code, Codex and Cursor."
     }
   ]
 }

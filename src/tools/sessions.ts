@@ -1,8 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { adoptPanes, projectDirs } from '../adopt.ts';
-import { findMachine, findProject, projectDir, UserError, type Machine } from '../config.ts';
+import { findMachine, findProject, projectDir, saveProject, UserError, type Machine, type Project } from '../config.ts';
 import { injectContext, logSession } from './memory.ts';
 import type { SessionRow } from '../db.ts';
 import { detectStatus, menuKeys, summarize, tail, type Status } from '../summarize.ts';
@@ -15,6 +15,59 @@ const SPOKEN: Record<Status, string> = {
   working: 'working', waiting_input: 'waiting for input', waiting_approval: 'waiting for approval',
   idle: 'idle', stopped: 'stopped',
 };
+
+/** Project of a session started outside the orchestrator: the longest known project id in its name. */
+export function projectOf(ctx: Ctx, name: string): string {
+  const rest = name.slice(3);
+  const known = ctx.cfg.projects.map((p) => p.id).filter((id) => rest === id || rest.startsWith(`${id}-`));
+  return known.sort((a, b) => b.length - a.length)[0] ?? rest.replace(/-[^-]+$/, '');
+}
+
+/** cc-<project>, or cc-<project>-2, -3… : never reuses a name the DB still tracks, so history stays per session. */
+function freeName(ctx: Ctx, live: string[], pid: string): string {
+  const taken = new Set([...live, ...ctx.db.sessions().map((r) => r.name)]);
+  for (let i = 1; ; i++) {
+    const n = i === 1 ? `cc-${pid}` : `cc-${pid}-${i}`;
+    if (!taken.has(n)) return n;
+  }
+}
+
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+/**
+ * Make sure the project has its own folder on the machine: clone `repo` if it is missing,
+ * or with `create` make it and `git init` it. Returns what was done, for the summary.
+ */
+async function ensureProjectDir(m: Machine, p: Project, create: boolean): Promise<string | undefined> {
+  const dir = qpath(projectDir(m, p));
+  const exists = await runOk(m, `test -d ${dir}`).then(() => true, () => false);
+  if (!exists && p.repo) {
+    // `--` so a repo value starting with "-" cannot be read as a git option.
+    await runOk(m, `mkdir -p "$(dirname ${dir})" && git clone -q -- ${q(p.repo)} ${dir}`, 300_000)
+      .catch((e) => { throw new UserError(`Could not clone ${p.repo} on ${m.id}: ${(e as Error).message.slice(0, 200)}`); });
+    return `Cloned ${p.repo}.`;
+  }
+  if (!exists && !create) throw new UserError(`Project folder ${projectDir(m, p)} does not exist on ${m.id}. Use create=true to make it.`);
+  if (!create) return undefined;
+  // A folder inside some other repo still gets its own: a project must never share a repo by accident.
+  const top = await runOk(m, `cd ${dir} && test "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)"`).then(() => true, () => false);
+  if (exists && top) return undefined;
+  await runOk(m, `mkdir -p ${dir} && git -C ${dir} init -q${p.repo ? ` && git -C ${dir} remote add origin -- ${q(p.repo)}` : ''}`);
+  return `Created ${projectDir(m, p)} with a new git repo.`;
+}
+
+/**
+ * Pre-accept Claude Code's first-run prompts for a folder this orchestrator just made: "trust this folder"
+ * and "allow external CLAUDE.md imports" (the brain context). Keys are per folder in ~/.claude.json.
+ * shortcut: read-modify-write races a Claude Code process writing the file at the same instant; the window is
+ * one jq run, and losing it only means the prompt shows once.
+ */
+async function trustFolder(m: Machine, dir: string): Promise<string | undefined> {
+  const keys = '{hasTrustDialogAccepted: true, hasClaudeMdExternalIncludesApproved: true, hasClaudeMdExternalIncludesWarningShown: true}';
+  return runOk(m, `command -v jq >/dev/null || exit 3; umask 077; d=$(cd ${qpath(dir)} && pwd -P) && f="$HOME/.claude.json" &&
+    { [ -s "$f" ] || echo '{}' > "$f"; } && jq --arg d "$d" '.projects[$d] = ((.projects[$d] // {}) + ${keys})' "$f" > "$f.cso-tmp" && mv "$f.cso-tmp" "$f"`)
+    .then(() => undefined, () => `Could not pre-trust the folder (needs jq on ${m.id}); answer the first prompt with session_approve.`);
+}
 
 export interface LiveSession extends SessionRow { reachable: boolean; last_activity: number | null }
 
@@ -43,7 +96,7 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
         if (owner && owner !== m.id) continue; // same name already tracked on another machine
         if (!rows.has(s.name)) {
           // Started outside the orchestrator: project is the middle of cc-<project>-<id>.
-          ctx.db.upsertSession({ name: s.name, machine: m.id, project: s.name.slice(3).replace(/-[^-]+$/, ''), status: 'idle', remote_control: 0 });
+          ctx.db.upsertSession({ name: s.name, machine: m.id, project: projectOf(ctx, s.name), status: 'idle', remote_control: 0 });
         }
         const row = ctx.db.session(s.name)!;
         const seen = detectStatus(s.pane);
@@ -125,13 +178,19 @@ function findAny(ctx: Ctx, name: string): SessionRow {
 export async function writeLog(ctx: Ctx, s: SessionRow, m: Machine, note?: string) {
   try {
     let text = note ?? '';
-    const raw = await tmux.capture(m, s, 400).catch(() => null);
-    if (raw) {
+    const tr = await readTranscript(m, s.transcript, s.claude_id).catch(() => null);
+    const raw = tr ? null : await tmux.capture(m, s, 400).catch(() => null);
+    if (tr) {
+      const t = lastTurn(tr);
+      const reply = t.reply.length > 600 ? `${t.reply.slice(0, 600)}…` : t.reply;
+      text = [note, t.prompt && `Last ask: ${t.prompt.slice(0, 200)}`, reply && `Last reply: ${reply}`,
+        t.files.length && `Files changed: ${t.files.join(', ')}`].filter(Boolean).join('\n');
+    } else if (raw) {
       const sum = summarize(raw);
       text = [note, sum.last_action && `Last action: ${sum.last_action}`, `${sum.changed_files_count} files changed`,
         sum.last_error && `Last error: ${sum.last_error}`].filter(Boolean).join('. ') + '.';
     }
-    await logSession(ctx, s.project, s.name, `Machine: ${m.id}. ${text || 'Session ended.'}`);
+    await logSession(ctx, s.project, s.name, `Machine: ${m.id}.${s.claude_id ? ` Claude session: ${s.claude_id}.` : ''}\n${text || 'Session ended.'}`);
   } catch (e) {
     console.error(`session log for ${s.name} failed:`, (e as Error).message);
   }
@@ -217,37 +276,54 @@ export function register(server: McpServer, ctx: Ctx) {
       };
     });
 
-  tool(server, ctx, 'session_start', 'Start a new Claude Code session in tmux for a project (Remote Control on by default so it shows in the Claude app). Machine defaults to the project\'s machine.',
+  tool(server, ctx, 'session_start', 'Start a new Claude Code session in tmux for a project, always in the project\'s own folder (Remote Control on by default so it shows in the Claude app). The session is named after the project. Machine defaults to the project\'s machine. For a new project pass create=true: it gets its own folder and git repo (or a clone of repo), is registered, and the folder is pre-trusted in Claude Code so no trust prompt blocks the session.',
     {
-      project: z.string().describe('Project id or spoken alias'),
+      project: z.string().describe('Project id or spoken alias; with create=true, the new project\'s name'),
+      create: z.boolean().default(false).describe('New project: create its folder and git repo and register it'),
+      repo: z.string().optional().describe('With create=true: git URL to clone (or to set as origin)'),
       machine: z.string().optional(),
       prompt: z.string().optional().describe('First message for the session'),
       remote_control: z.boolean().default(true),
       name: z.string().optional().describe('Custom short name; becomes cc-<name>'),
       wait: WAIT(45),
     },
-    async ({ project, machine, prompt, remote_control, name, wait }) => {
-      const p = findProject(ctx.cfg, project);
-      const m = findMachine(ctx.cfg, machine ?? p.machine);
-      const sname = name
-        ? `cc-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`
-        : `cc-${p.id}-${randomBytes(2).toString('hex')}`;
+    async ({ project, create, repo, machine, prompt, remote_control, name, wait }) => {
+      let p: Project | undefined;
+      try { p = findProject(ctx.cfg, project); } catch (e) { if (!create) throw e; }
+      if (p && repo && p.repo !== repo) throw new UserError(`${p.id} already exists${p.repo ? ` with repo ${p.repo}` : ''}; edit projects.yaml to change it.`);
+      const mid = machine ?? p?.machine ?? (ctx.cfg.machines.find((x) => x.local) ?? ctx.cfg.machines[0])?.id;
+      if (!mid) throw new UserError('No machines configured.');
+      const m = findMachine(ctx.cfg, mid);
+      const live = (await tmux.snapshot(m)).map((s) => s.name); // also fails fast when the machine is unreachable
+      const isNew = !p;
+      if (!p) {
+        const id = slug(project);
+        if (!id) throw new UserError(`"${project}" is not a usable project name.`);
+        // Saved only after the folder exists: a failed setup must not leave a registered project behind.
+        p = { id, aliases: id === project.toLowerCase() ? [] : [project], machine: m.id, shared: [], ...(repo && { repo }) };
+      }
+      const setup = await ensureProjectDir(m, p, create);
+      // Only folders made here are trusted automatically; an existing folder keeps Claude Code's own prompt.
+      const trustWarning = setup ? await trustFolder(m, projectDir(m, p)) : undefined;
+      if (isNew) p = saveProject(ctx.cfg, p);
+      const sname = name ? `cc-${slug(name)}` : freeName(ctx, live, p.id);
       if (!tmux.SESSION_RE.test(sname)) throw new UserError(`"${name}" is not a usable session name.`);
-      if ((await tmux.snapshot(m)).some((s) => s.name === sname)) throw new UserError(`${sname} already exists on ${m.id}.`);
+      if (live.includes(sname)) throw new UserError(`${sname} already exists on ${m.id}.`);
       const dir = projectDir(m, p);
-      await runOk(m, `test -d ${qpath(dir)}`).catch(() => { throw new UserError(`Project folder ${dir} does not exist on ${m.id}.`); });
       // Spec §5: refresh context.md and the CLAUDE.md import first. A brain problem must not block the session.
       let warning: string | undefined;
       await injectContext(ctx, m, p.id).catch((e) => { warning = `Shared context not updated: ${(e as Error).message}`; });
       // --remote-control takes an optional name, so always pass one or the prompt would be eaten as the name.
       // Our own session id makes the transcript findable: ~/.claude/projects/*/<id>.jsonl.
       const claudeId = randomUUID();
-      const cmd = `${m.claude_cmd}${remote_control ? ` --remote-control ${q(sname)}` : ''} --session-id ${claudeId}${prompt ? ` ${q(prompt)}` : ''}`;
+      // The project name (cc- dropped) labels it in the Claude app and in /resume.
+      const label = q(sname.slice(3));
+      const cmd = `${m.claude_cmd} --name ${label}${remote_control ? ` --remote-control ${label}` : ''} --session-id ${claudeId}${prompt ? ` ${q(prompt)}` : ''}`;
       const started = Date.now();
       await tmux.newSession(m, sname, dir, cmd);
       ctx.db.upsertSession({ name: sname, machine: m.id, project: p.id, status: prompt ? 'working' : 'waiting_input', remote_control: remote_control ? 1 : 0 });
       ctx.db.setTranscript(sname, claudeId, null);
-      const base = `Started ${p.id} on ${m.id} as ${sname}${remote_control ? '; it shows in the Claude app' : ''}.${warning ? ` ${warning}` : ''}`;
+      const base = `${setup ? `${setup}${trustWarning ? ` ${trustWarning}` : ' Trusted it in Claude Code.'} ` : ''}Started ${p.id} on ${m.id} as ${sname}${remote_control ? '; it shows in the Claude app' : ''}.${warning ? ` ${warning}` : ''}`;
       const turn = prompt ? await sendAndWait(ctx, { ...ctx.db.session(sname)!, m }, wait, started) : null;
       return turn ? { ...turn, summary: `${base} ${turn.summary}`, session: sname } : { summary: base, session: sname };
     });
@@ -366,6 +442,22 @@ export function register(server: McpServer, ctx: Ctx) {
       return {
         summary: `Deleted ${what}.${killed ? ` Stopped ${killed} running.` : ''}${delete_transcript ? ` Removed ${transcripts} transcript${transcripts === 1 ? '' : 's'}.` : ''}`,
         deleted: rows.map((r) => r.name),
+      };
+    });
+
+  tool(server, ctx, 'project_sessions', 'Every session a project has had (running and ended), newest first, with machine, start time and Claude Code session id. Ended sessions\' notes are in the brain at projects/<project>/log.md and reach new sessions through their context.',
+    { project: z.string() },
+    async ({ project }) => {
+      const p = findProject(ctx.cfg, project);
+      await refresh(ctx).catch(() => {});
+      const rows = ctx.db.projectSessions(p.id);
+      const running = rows.filter((r) => r.status !== 'stopped').length;
+      return {
+        summary: rows.length ? `${p.id} has had ${rows.length} session${rows.length === 1 ? '' : 's'}, ${running} running. Latest: ${rows[0].name} on ${rows[0].machine}, ${SPOKEN[rows[0].status]}.` : `${p.id} has no sessions yet.`,
+        sessions: rows.map((r) => ({
+          name: r.name, machine: r.machine, status: r.status, claude_session_id: r.claude_id,
+          started: r.created && new Date(r.created).toISOString(), last_message: r.last_message,
+        })),
       };
     });
 

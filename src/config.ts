@@ -1,6 +1,6 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse } from 'yaml';
+import { parse, parseDocument, type YAMLSeq } from 'yaml';
 import { z } from 'zod';
 
 const Machine = z.object({
@@ -20,6 +20,7 @@ const Project = z.object({
   aliases: z.array(z.string()).default([]),
   machine: z.string(),
   path: z.string().optional(), // relative to projects_root, or absolute / ~
+  repo: z.string().optional(), // git URL: cloned into the project folder when a machine does not have it yet
   shared: z.array(z.string()).default([]),
 });
 
@@ -86,6 +87,22 @@ export function loadConfig(dir = process.env.CONFIG_DIR ?? 'config'): Config {
     if (!llm.endpoints.some((e) => e.id === id)) throw new Error(`routing.order: unknown endpoint ${id}`);
   }
   return { machines, projects, endpoints: llm.endpoints, routing, agents: llm.agents };
+}
+
+/** Register a new project: in memory and appended to projects.yaml (comments kept). */
+export function saveProject(cfg: Config, input: z.input<typeof Project>, dir = process.env.CONFIG_DIR ?? 'config'): Project {
+  const p = Project.parse(input);
+  if (!cfg.machines.some((m) => m.id === p.machine)) throw new UserError(`Unknown machine "${p.machine}".`);
+  const file = join(dir, 'projects.yaml');
+  const doc = parseDocument(existsSync(file) ? readFileSync(file, 'utf8') : 'projects: []\n');
+  if (!doc.has('projects') || doc.get('projects') === null) doc.set('projects', doc.createNode([]));
+  (doc.get('projects') as YAMLSeq).flow = false; // `projects: []` would otherwise grow as one long flow line
+  // Drop undefined/default-empty fields so the YAML stays as short as a hand-written entry.
+  const entry = Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length)));
+  doc.addIn(['projects'], doc.createNode(entry));
+  writeFileSync(file, doc.toString());
+  cfg.projects.push(p);
+  return p;
 }
 
 export function findMachine(cfg: Config, id: string): Machine {

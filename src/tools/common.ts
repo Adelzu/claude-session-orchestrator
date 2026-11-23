@@ -31,6 +31,7 @@ const HINTS: Record<string, Hint> = {
   memory_delete: ['Delete a memory file', 'destructive'],
   memory_link: ['Link shared knowledge to a project', 'write'],
   project_context: ['Project context', 'read'],
+  project_sessions: ['Sessions of a project', 'read'],
   llm_list: ['List local models', 'read'],
   llm_run: ['Run a task on a local model', 'read', true],
   agent_run: ['Run a local agent', 'destructive', true],

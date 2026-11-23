@@ -69,7 +69,7 @@ export function app(ctx: Ctx, eventsToken = process.env.EVENTS_TOKEN, mcpToken =
   });
 }
 
-if (import.meta.main) {
+export async function main() {
   const ctx = await boot();
   if (!process.env.EVENTS_TOKEN) console.warn('EVENTS_TOKEN is not set: /events will reject every hook.');
   if (!process.env.MCP_TOKEN && !process.env.CF_ACCESS_AUD) console.warn('Neither MCP_TOKEN nor CF_ACCESS_TEAM_DOMAIN/CF_ACCESS_AUD is set: /mcp will reject every request.');
@@ -84,3 +84,5 @@ if (import.meta.main) {
     await connectCloud(() => mcpServer(ctx), process.env.ORCH_CLOUD_URL, process.env.ORCH_AGENT_TOKEN);
   }
 }
+
+if (import.meta.main) await main();

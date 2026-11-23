@@ -4,6 +4,7 @@ node_modules/
 config/*.yaml
 !config/*.example.yaml
 *.db-*
+dist/
 .env.*
 !.env.example
 .wrangler/
