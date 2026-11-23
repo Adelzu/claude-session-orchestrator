@@ -18,6 +18,7 @@ export function matchDetail(cfg: Config, m: Machine, home: string, cwd: string, 
   const cwds = [cwd, real.cwd].filter((x): x is string => !!x).map(norm);
   let best: { id: string; dir: string } | null = null;
   for (const p of cfg.projects) {
+    if (p.machine !== m.id) continue; // a project's folder only exists on its own machine
     const written = projectDir(m, p);
     const dirs: string[] = [];
     if (written === '~' || written.startsWith('~/')) { if (home) dirs.push(home + written.slice(1)); }
@@ -35,7 +36,7 @@ export const matchProject = (cfg: Config, m: Machine, home: string, cwd: string,
   matchDetail(cfg, m, home, cwd, real)?.id ?? null;
 
 /** Project folders as configured for this machine, for discover() to resolve with realpath. */
-export const projectDirs = (cfg: Config, m: Machine): string[] => cfg.projects.map((p) => projectDir(m, p));
+export const projectDirs = (cfg: Config, m: Machine): string[] => cfg.projects.filter((p) => p.machine === m.id).map((p) => projectDir(m, p));
 
 export interface AdoptIo {
   /** Rename a tmux session on the machine. */

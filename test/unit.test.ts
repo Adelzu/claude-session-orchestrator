@@ -10,7 +10,7 @@ import { statusFor } from '../src/tools/events.ts';
 import { parseKv } from '../src/tools/machines.ts';
 import { findProject, loadConfig, type Config, type Machine } from '../src/config.ts';
 import { lastActivity } from '../src/tools/sessions.ts';
-import { adoptedName, adoptPanes, matchProject, type AdoptIo } from '../src/adopt.ts';
+import { adoptedName, adoptPanes, matchProject, projectDirs, type AdoptIo } from '../src/adopt.ts';
 import { Db } from '../src/db.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { isClaudeArgs, newSessionCmd, parseDiscovery, RCVAL_SH, resolveRemoteControl } from '../src/tmux.ts';
@@ -256,6 +256,21 @@ test('matchProject: realpath on both sides (symlinked pane cwd or project folder
   const cfg = cfgOf({ id: 'webapp', machine: 'hub', path: 'webapp' });
   assert.equal(matchProject(cfg, m, '/home/u', '/work/link', { cwd: '/home/u/webapp/api' }), 'webapp'); // pane cwd is a symlink
   assert.equal(matchProject(cfg, m, '/home/u', '/data/webapp/x', { dirs: new Map([['~/webapp', '/data/webapp']]) }), 'webapp'); // folder is a symlink
+});
+
+test('matchProject: only projects of the scanned machine can match (same relative path on another machine)', () => {
+  const hub = { id: 'hub', projects_root: '~' } as Machine;
+  const cfg = cfgOf({ id: 'other-app', machine: 'gpu', path: 'app' }, { id: 'app', machine: 'hub', path: 'app/api' });
+  assert.equal(matchProject(cfg, hub, '/home/u', '/home/u/app/api/src'), 'app'); // not 'other-app', which is on gpu
+  assert.equal(matchProject(cfgOf({ id: 'other-app', machine: 'gpu', path: 'app' }), hub, '/home/u', '/home/u/app'), null);
+  const gpu = { id: 'gpu', projects_root: '~/projects' } as Machine;
+  assert.equal(matchProject(cfgOf({ id: 'other-app', machine: 'gpu', path: 'app' }), gpu, '/home/u', '/home/u/projects/app'), 'other-app');
+});
+
+test('projectDirs: lists only the scanned machine\'s project folders', () => {
+  const cfg = cfgOf({ id: 'a', machine: 'hub', path: 'a' }, { id: 'b', machine: 'gpu', path: 'b' });
+  assert.deepEqual(projectDirs(cfg, { id: 'hub', projects_root: '~' } as Machine), ['~/a']);
+  assert.deepEqual(projectDirs(cfg, { id: 'gpu', projects_root: '~/p' } as Machine), ['~/p/b']);
 });
 
 test('parseDiscovery: --remote-control / --rc, realpaths and resolved folders', () => {
