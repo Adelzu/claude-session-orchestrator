@@ -11,6 +11,3 @@ dist/
 *.bak*
 config/*.yaml*
 !config/*.example.yaml
-claude-orch.pp
-claude-orch.te
-/CLAUDE.md
