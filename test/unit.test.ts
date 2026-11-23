@@ -9,6 +9,7 @@ import { clean, detectStatus, menuKeys, summarize, tail } from '../src/summarize
 import { statusFor } from '../src/tools/events.ts';
 import { parseKv } from '../src/tools/machines.ts';
 import { findProject, loadConfig } from '../src/config.ts';
+import { newSessionCmd } from '../src/tmux.ts';
 
 test('q() survives quotes and shell metacharacters', () => {
   const nasty = `it's "x" $(rm -rf /) \`id\` ; | &`;
@@ -159,4 +160,11 @@ test('cli: init writes a loadable config with private tokens, install print give
   assert.match(readFileSync(join(home, '.env'), 'utf8'), /^EVENTS_TOKEN=[0-9a-f]{64}\nMCP_TOKEN=[0-9a-f]{64}\n$/);
   const out = JSON.parse(cli('install', 'print'));
   assert.deepEqual(out.mcpServers['session-orchestrator'].args.slice(-2), [join(process.cwd(), 'src', 'cli.ts'), 'stdio']);
+});
+
+test('newSessionCmd: default tmux socket, own systemd scope only when no server runs', () => {
+  const c = newSessionCmd('cc-x-1', '~/p', "it's");
+  assert.match(c, /^if tmux list-sessions >\/dev\/null 2>&1; then tmux new-session -d -s 'cc-x-1' -c "\$HOME"'\/p' 'it'\\''s'; else systemd-run --user --scope --quiet tmux new-session /);
+  assert.match(c, /\|\| tmux new-session -d -s 'cc-x-1'[^;]*; fi$/);
+  assert.doesNotMatch(c, /\s-[LS]\s/); // no custom socket
 });

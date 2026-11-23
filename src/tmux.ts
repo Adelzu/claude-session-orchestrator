@@ -26,8 +26,18 @@ export async function snapshot(m: Machine): Promise<TmuxSession[]> {
   }).filter((s) => SESSION_RE.test(s.name) && !seen.has(s.name) && !!seen.add(s.name));
 }
 
-export const newSession = (m: Machine, name: string, dir: string, cmd: string) =>
-  runOk(m, `tmux new-session -d -s ${q(name)} -c ${qpath(dir)} ${q(cmd)}`);
+/**
+ * Uses the machine's own tmux: the default server and socket, same as by hand. A running server just
+ * gets the new session. If none runs, tmux starts one that daemonizes inside the cgroup of whoever
+ * launched it, so from the orchestrator service it would die with every service restart. Start it in
+ * its own transient systemd scope instead (plain tmux where systemd-run is unavailable).
+ */
+export const newSessionCmd = (name: string, dir: string, cmd: string) => {
+  const nw = `tmux new-session -d -s ${q(name)} -c ${qpath(dir)} ${q(cmd)}`;
+  return `if tmux list-sessions >/dev/null 2>&1; then ${nw}; else systemd-run --user --scope --quiet ${nw} 2>/dev/null || ${nw}; fi`;
+};
+
+export const newSession = (m: Machine, name: string, dir: string, cmd: string) => runOk(m, newSessionCmd(name, dir, cmd));
 
 /** Type literal text, then press Enter (separate call so text is never parsed as key names). */
 export async function sendText(m: Machine, name: string, text: string) {

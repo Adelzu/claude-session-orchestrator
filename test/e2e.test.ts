@@ -17,6 +17,9 @@ import { machineToken } from '../src/auth.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), 'orch-'));
 process.env.TMUX_TMPDIR = tmp; // private tmux server, inherited by every child process
+// Inside tmux, $TMUX names the user's own socket and wins over TMUX_TMPDIR: drop it so the tests (and their kill-server) never touch it.
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
 process.env.BRAIN_DIR = join(tmp, 'brain');
 process.env.CONFIG_DIR = join(tmp, 'config'); // project_create writes projects.yaml here
 mkdirSync(join(tmp, 'config'));
@@ -163,6 +166,14 @@ test('session lifecycle over MCP + hooks', async () => {
   const name: string = start.session;
   assert.equal(name, 'cc-demo'); // named after the project
   await wait(300);
+
+  // The tmux server must not live in our own cgroup, or restarting the orchestrator service would kill it.
+  let scoped = true;
+  try { execSync('systemd-run --user --scope --quiet true', { stdio: 'ignore' }); } catch { scoped = false; }
+  if (scoped) {
+    const cg = (pid: string | number) => readFileSync(`/proc/${pid}/cgroup`, 'utf8');
+    assert.notEqual(cg(execSync("tmux display -p '#{pid}'").toString().trim()), cg(process.pid));
+  }
 
   let read = await call('session_read', { session: 'demo', mode: 'tail' });
   assert.match(read.text, new RegExp(`args: --name demo --remote-control demo --session-id [0-9a-f-]{36} first 'task'`));
