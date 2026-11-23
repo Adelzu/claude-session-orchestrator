@@ -1,10 +1,10 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { adoptPanes } from '../adopt.ts';
+import { adoptPanes, projectDirs } from '../adopt.ts';
 import { findMachine, findProject, projectDir, UserError, type Machine } from '../config.ts';
 import { injectContext, logSession } from './memory.ts';
-import type { SessionRow } from '../db.ts';
+import { REMOTE_CONTROL_UNKNOWN, type SessionRow } from '../db.ts';
 import { detectStatus, menuKeys, summarize, tail, type Status } from '../summarize.ts';
 import * as tmux from '../tmux.ts';
 import { deleteTranscript, lastTurn, readTranscript } from '../transcript.ts';
@@ -28,7 +28,7 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
   const snaps = await Promise.all(ms.map(async (m) => {
     const hasAdopted = ctx.db.sessions().some((r) => r.machine === m.id && r.target && r.status !== 'stopped');
     try {
-      const [live, found] = await Promise.all([tmux.snapshot(m), adopt || hasAdopted ? tmux.discover(m) : null]);
+      const [live, found] = await Promise.all([tmux.snapshot(m), adopt || hasAdopted ? tmux.discover(m, projectDirs(ctx.cfg, m)) : null]);
       return { m, live, found };
     } catch { return { m, live: null, found: null }; }
   }));
@@ -59,6 +59,9 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
       for (const r of mine.filter((x) => x.target && x.status !== 'stopped')) {
         const p = found?.panes.find((x) => x.id === r.target);
         if (!p) { ctx.db.setStatus(r.name, 'stopped'); continue; }
+        // The flag on the command line is the only reliable signal; without it we cannot know.
+        const rc = p.remote_control ? 1 : REMOTE_CONTROL_UNKNOWN;
+        if (rc !== r.remote_control) ctx.db.setRemoteControl(r.name, rc);
         const seen = detectStatus(p.pane);
         if (seen && seen !== r.status) ctx.db.setStatus(r.name, seen, r.last_message);
         // No hooks reach adopted sessions: a turn that no longer shows "esc to interrupt" has ended.
@@ -209,7 +212,7 @@ export function register(server: McpServer, ctx: Ctx) {
         sessions: ss.map((s) => ({
           name: s.name, project: s.project, machine: s.machine, status: s.status,
           last_activity: s.last_activity && new Date(s.last_activity).toISOString(),
-          remote_control: !!s.remote_control, machine_reachable: s.reachable,
+          remote_control: s.remote_control < 0 ? null : !!s.remote_control, machine_reachable: s.reachable,
           adopted: !!s.target, ...(s.tmux_session && { tmux_session: s.tmux_session }),
         })),
       };

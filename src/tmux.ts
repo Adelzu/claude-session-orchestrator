@@ -71,12 +71,20 @@ export interface ClaudePane {
   cwd: string;
   activity: number;         // ms, last activity of the tmux session
   pane: string;             // last 30 lines
+  claude_pid: number;       // the Claude Code process; changes when it restarts in the same pane
   claude_id: string | null; // from --session-id / --resume in the process args, if given
+  remote_control: boolean;  // --remote-control / --rc on the command line; turned on later from inside Claude Code is not visible
+  real_cwd?: string;        // realpath of cwd on the machine, when it could be resolved
 }
-export interface Discovery { home: string; panes: ClaudePane[] }
+export interface Discovery {
+  home: string;
+  panes: ClaudePane[];
+  dirs: Map<string, string>; // configured project folder (as written) -> its realpath on the machine
+}
 
 const INTERPRETERS = new Set(['node', 'bun', 'sh', 'bash', 'zsh', 'env']);
 const base = (t?: string) => t?.split('/').pop() ?? '';
+const REMOTE_CONTROL = /(?:^|\s)--(?:remote-control|rc)(?:[\s=]|$)/;
 const CLAUDE_ID = /--(?:session-id|resume)[ =]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
 
 /** Executable names that mean "Claude Code" on a machine: `claude` plus whatever its claude_cmd runs. */
@@ -94,7 +102,10 @@ export function isClaudeArgs(args: string, names: string[]): boolean {
 /** Pure part of discover(): the panes whose process tree contains Claude Code. */
 export function parseDiscovery(out: string, mark: string, names: string[]): Discovery {
   let home = '', ps = '', panes = '';
-  const caps = new Map<string, string>();
+  const caps = new Map<string, string>(), realCwd = new Map<string, string>(), dirs = new Map<string, string>();
+  const pairs = (body: string, into: Map<string, string>) => {
+    for (const l of body.split('\n')) { const [k, v] = l.split('\t'); if (k && v) into.set(k, v); }
+  };
   for (const chunk of out.split(`${mark} `).slice(1)) {
     const nl = chunk.indexOf('\n');
     const head = (nl === -1 ? chunk : chunk.slice(0, nl)).trim();
@@ -103,6 +114,8 @@ export function parseDiscovery(out: string, mark: string, names: string[]): Disc
     else if (head === 'ps') ps = body;
     else if (head === 'panes') panes = body;
     else if (head.startsWith('cap ')) caps.set(head.slice(4), body);
+    else if (head === 'real') pairs(body, realCwd);
+    else if (head === 'dirs') pairs(body, dirs);
   }
   const kids = new Map<number, number[]>(), args = new Map<number, string>();
   for (const l of ps.split('\n')) {
@@ -111,14 +124,14 @@ export function parseDiscovery(out: string, mark: string, names: string[]): Disc
     args.set(Number(m[1]), m[3]);
     kids.set(Number(m[2]), [...(kids.get(Number(m[2])) ?? []), Number(m[1])]);
   }
-  const claudeIn = (root: number): string | null => {
+  const claudeIn = (root: number): { pid: number; args: string } | null => {
     const seen = new Set<number>(), stack = [root];
     while (stack.length) {
       const p = stack.pop()!;
       if (seen.has(p)) continue;
       seen.add(p);
       const a = args.get(p);
-      if (a && isClaudeArgs(a, names)) return a;
+      if (a && isClaudeArgs(a, names)) return { pid: p, args: a };
       stack.push(...(kids.get(p) ?? []));
     }
     return null;
@@ -129,19 +142,34 @@ export function parseDiscovery(out: string, mark: string, names: string[]): Disc
     const [id, pid, act, session, ...cwd] = l.split('\t');
     if (!PANE_RE.test(id ?? '') || seenIds.has(id) || !session) continue;
     seenIds.add(id);
-    const a = claudeIn(Number(pid));
-    if (a === null) continue;
-    found.push({ id, session, cwd: cwd.join('\t'), activity: Number(act) * 1000, pane: caps.get(id) ?? '', claude_id: a.match(CLAUDE_ID)?.[1] ?? null });
+    const hit = claudeIn(Number(pid));
+    if (hit === null) continue;
+    const a = hit.args;
+    found.push({
+      id, session, cwd: cwd.join('\t'), activity: Number(act) * 1000, pane: caps.get(id) ?? '',
+      claude_pid: hit.pid, claude_id: a.match(CLAUDE_ID)?.[1] ?? null, remote_control: REMOTE_CONTROL.test(a),
+      ...(realCwd.has(id) && { real_cwd: realCwd.get(id) }),
+    });
   }
-  return { home, panes: found };
+  return { home, panes: found, dirs };
 }
 
-/** Every pane on a machine that runs Claude Code, in one round trip (panes, process table, pane text). */
-export async function discover(m: Machine): Promise<Discovery> {
+/**
+ * Every pane on a machine that runs Claude Code, in one round trip (panes, process table, pane text).
+ * `dirs` are configured project folders (may start with ~); the machine resolves them with realpath.
+ */
+export async function discover(m: Machine, dirs: string[] = []): Promise<Discovery> {
   const mark = `@@cc-${randomBytes(12).toString('hex')}@@`; // random per call: pane text cannot forge records
-  const r = await run(m, `echo "${mark} home $HOME"; echo "${mark} ps"; ps -A -ww -o pid=,ppid=,args= 2>/dev/null
+  // $HOME can be unset in a service environment; fall back to the account's home directory.
+  const dirLines = dirs.map((d) => `d=${q(d)}; case "$d" in "~") d=$H;; "~/"*) d="$H/\${d#"$t"}";; esac; printf '%s\\t%s\\n' ${q(d)} "$(realpath -e -- "$d" 2>/dev/null)"`).join('\n');
+  const r = await run(m, `t='~/'; H=\${HOME:-$(cd ~ 2>/dev/null && pwd -P)}
+    echo "${mark} home $H"; echo "${mark} ps"; ps -A -ww -o pid=,ppid=,args= 2>/dev/null
     echo "${mark} panes"
     tmux list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{session_activity}\t#{session_name}\t#{pane_current_path}' 2>/dev/null
+    echo "${mark} real"
+    tmux list-panes -a -F '#{pane_id}\t#{pane_current_path}' 2>/dev/null | while IFS="$(printf '\\t')" read -r p c; do printf '%s\\t%s\\n' "$p" "$(realpath -e -- "$c" 2>/dev/null)"; done
+    echo "${mark} dirs"
+    ${dirLines}
     tmux list-panes -a -F '#{pane_id}' 2>/dev/null | while read -r p; do echo "${mark} cap $p"; tmux capture-pane -p -J -t "$p" -S -30; done; true`, 8000);
   if (r.code === 255) throw unreachable(m);
   return parseDiscovery(r.stdout, mark, claudeNames(m));
