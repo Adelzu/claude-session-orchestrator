@@ -69,6 +69,9 @@ async function trustFolder(m: Machine, dir: string): Promise<string | undefined>
     .then(() => undefined, () => `Could not pre-trust the folder (needs jq on ${m.id}); answer the first prompt with session_approve.`);
 }
 
+/** Last activity: the newest of what tmux saw and the row's last status change (hook events and scans). */
+export const lastActivity = (tmuxMs: number, statusSince: number | null | undefined) => Math.max(tmuxMs || 0, statusSince ?? 0);
+
 export interface LiveSession extends SessionRow { reachable: boolean; last_activity: number | null }
 
 /**
@@ -106,7 +109,7 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
         const seen = detectStatus(s.pane);
         // Pane regex is the fallback for missed hooks; it only overrides when it sees something definite.
         if (seen && seen !== row.status) ctx.db.setStatus(s.name, seen, row.last_message);
-        out.push({ ...ctx.db.session(s.name)!, reachable: true, last_activity: s.activity });
+        { const r = ctx.db.session(s.name)!; out.push({ ...r, reachable: true, last_activity: lastActivity(s.activity, r.status_since) }); }
         rows.delete(s.name);
       }
       for (const r of rows.values()) {
@@ -122,7 +125,7 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
         if (seen && seen !== r.status) ctx.db.setStatus(r.name, seen, r.last_message);
         // No hooks reach adopted sessions: a turn that no longer shows "esc to interrupt" has ended.
         else if (!seen && (r.status === 'working' || r.status === 'waiting_approval') && Date.now() - r.status_since > 5000) ctx.db.setStatus(r.name, 'idle');
-        out.push({ ...ctx.db.session(r.name)!, reachable: true, last_activity: p.activity });
+        { const cur = ctx.db.session(r.name)!; out.push({ ...cur, reachable: true, last_activity: lastActivity(p.activity, cur.status_since) }); }
       }
     } else {
       for (const r of mine) if (r.status !== 'stopped') out.push({ ...r, reachable: false, last_activity: null });

@@ -499,8 +499,12 @@ test('adopts Claude Code panes started outside the orchestrator (tmux, any sessi
     assert.equal((await hook('cc-mywork', { hook_event_name: 'Notification', message: 'Claude needs your permission to use Bash' })).status, 204);
     assert.equal(db.session('cc-mywork')!.status, 'waiting_approval');
     assert.ok(db.session('cc-mywork')!.target, 'still the adopted row');
+    const tHook = Date.now();
     assert.equal((await hook('cc-mywork', { hook_event_name: 'Stop' })).status, 204);
     assert.equal(db.session('cc-mywork')!.status, 'idle');
+    // A hook event bumps last_activity even though tmux saw no client input.
+    const la = (await call('session_list')).sessions.find((x: { name: string }) => x.name === 'cc-mywork').last_activity;
+    assert.ok(Date.parse(la) >= tHook - 1000, `last_activity ${la} is current`);
     assert.equal(db.sessions().filter((r) => r.name === 'cc-mywork').length, 1);
 
     // Works like a native session: send (exact reply from transcript via --session-id), read, approve, stop.

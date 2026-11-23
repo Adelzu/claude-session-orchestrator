@@ -9,6 +9,7 @@ import { clean, detectStatus, menuKeys, summarize, tail } from '../src/summarize
 import { statusFor } from '../src/tools/events.ts';
 import { parseKv } from '../src/tools/machines.ts';
 import { findProject, loadConfig, type Config, type Machine } from '../src/config.ts';
+import { lastActivity } from '../src/tools/sessions.ts';
 import { adoptedName, adoptPanes, matchProject, type AdoptIo } from '../src/adopt.ts';
 import { Db } from '../src/db.ts';
 import { DatabaseSync } from 'node:sqlite';
@@ -193,9 +194,9 @@ const DISCOVERY = [
   '  200     1 -bash', '  201   200 vim notes.txt',
   '  300     1 -bash', '  301   300 claude -p one-shot',
   `${MARK} panes`,
-  '%1\t100\t1700000000\twork\t/home/u/projects/app/src',
-  '%2\t200\t1700000000\twork\t/home/u',
-  '%3\t300\t1700000000\tbatch\t/tmp',
+  '%1\t100\t1700000000\t1700000500\twork\t/home/u/projects/app/src', // window output is newer than the session's last client input
+  '%2\t200\t1700000000\t1700000000\twork\t/home/u',
+  '%3\t300\t1700000000\t1700000000\tbatch\t/tmp',
   `${MARK} cap %1`, '✻ Thinking… (esc to interrupt)',
   `${MARK} cap %2`, '$ ',
 ].join('\n') + '\n';
@@ -205,10 +206,24 @@ test('parseDiscovery keeps only panes with Claude Code in their process tree', (
   assert.equal(d.home, '/home/u');
   assert.equal(d.panes.length, 1);
   assert.deepEqual({ ...d.panes[0], pane: undefined }, {
-    id: '%1', session: 'work', cwd: '/home/u/projects/app/src', activity: 1700000000_000, pane: undefined, claude_pid: 101, claude_id: ID, remote_control: -1,
+    id: '%1', session: 'work', cwd: '/home/u/projects/app/src', activity: 1700000500_000, pane: undefined, claude_pid: 101, claude_id: ID, remote_control: -1,
   });
   assert.match(d.panes[0].pane, /esc to interrupt/);
   assert.deepEqual(parseDiscovery(DISCOVERY.replaceAll(MARK, '@@other@@'), MARK, ['claude']).panes, []); // wrong marker: nothing forged
+});
+
+test('parseDiscovery: activity is the newer of session_activity and window_activity (Remote Control never touches the session)', () => {
+  const out = (sess: number, win: string) => [`${MARK} home /h`, `${MARK} ps`, '  100     1 -bash', '  101   100 claude', `${MARK} panes`, `%1\t100\t${sess}\t${win}\ts\t/x`].join('\n') + '\n';
+  assert.equal(parseDiscovery(out(100, '300'), MARK, ['claude']).panes[0].activity, 300_000);
+  assert.equal(parseDiscovery(out(500, '300'), MARK, ['claude']).panes[0].activity, 500_000);
+  assert.equal(parseDiscovery(out(500, ''), MARK, ['claude']).panes[0].activity, 500_000); // field missing
+});
+
+test('lastActivity: the newest of tmux activity and the last status change (hook events)', () => {
+  assert.equal(lastActivity(1000, 5000), 5000);
+  assert.equal(lastActivity(9000, 5000), 9000);
+  assert.equal(lastActivity(0, null), 0);
+  assert.equal(lastActivity(NaN, 7), 7);
 });
 
 test('matchProject: longest folder wins, subfolders match, otherwise null', () => {
@@ -247,7 +262,7 @@ test('parseDiscovery: --remote-control / --rc, realpaths and resolved folders', 
   const out = [
     `${MARK} home /home/u`, `${MARK} ps`,
     '  100     1 -bash', '  101   100 claude --rc', '  200     1 -bash', '  201   200 claude --remote-control my-name', '  300     1 -bash', '  301   300 claude',
-    `${MARK} panes`, '%1\t100\t1\ta\t/x', '%2\t200\t1\tb\t/y', '%3\t300\t1\tc\t/z',
+    `${MARK} panes`, '%1\t100\t1\t1\ta\t/x', '%2\t200\t1\t1\tb\t/y', '%3\t300\t1\t1\tc\t/z',
     `${MARK} real`, '%1\t/real/x', `${MARK} dirs`, '~/webapp\t/home/u/webapp',
   ].join('\n') + '\n';
   const d = parseDiscovery(out, MARK, ['claude']);
@@ -475,7 +490,7 @@ test('resolveRemoteControl: managed > flag > project(off only) > user, else unkn
 test('parseDiscovery: per-pane settings feed remote_control', () => {
   const out = [
     `${MARK} home /home/u`, `${MARK} ps`, '  100     1 -bash', '  101   100 claude', '  200     1 -bash', '  201   200 claude', '  300     1 -bash', '  301   300 claude',
-    `${MARK} panes`, '%1\t100\t1\ta\t/x', '%2\t200\t1\tb\t/y', '%3\t300\t1\tc\t/z',
+    `${MARK} panes`, '%1\t100\t1\t1\ta\t/x', '%2\t200\t1\t1\tb\t/y', '%3\t300\t1\t1\tc\t/z',
     `${MARK} rc`, '%1\ttrue\t\t', '%2\ttrue\tfalse\t', '%3\t\t\t',
   ].join('\n') + '\n';
   assert.deepEqual(parseDiscovery(out, MARK, ['claude']).panes.map((p) => p.remote_control), [1, 0, -1]);
