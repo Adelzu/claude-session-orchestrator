@@ -73,9 +73,12 @@ export interface ClaudePane {
   pane: string;             // last 30 lines
   claude_pid: number;       // the Claude Code process; changes when it restarts in the same pane
   claude_id: string | null; // from --session-id / --resume in the process args, if given
-  remote_control: boolean;  // --remote-control / --rc on the command line; turned on later from inside Claude Code is not visible
+  remote_control: number;   // 1 on, 0 off, -1 unknown: see resolveRemoteControl
   real_cwd?: string;        // realpath of cwd on the machine, when it could be resolved
 }
+/** `remoteControlAtStartup` as read on the machine; undefined = not set (or not a boolean) there. */
+export interface RcSettings { user?: boolean; project?: boolean; managed?: boolean }
+
 export interface Discovery {
   home: string;
   panes: ClaudePane[];
@@ -85,6 +88,21 @@ export interface Discovery {
 const INTERPRETERS = new Set(['node', 'bun', 'sh', 'bash', 'zsh', 'env']);
 const base = (t?: string) => t?.split('/').pop() ?? '';
 const REMOTE_CONTROL = /(?:^|\s)--(?:remote-control|rc)(?:[\s=]|$)/;
+
+/**
+ * Is Remote Control on for a Claude Code process? Claude Code 2.1.330: `remoteControlAtStartup` (boolean)
+ * starts it every session; repo-scoped settings (project, local) cannot enable it, only turn it off;
+ * managed policy can lock it; --remote-control / --rc turns it on and no flag turns it off.
+ * Precedence: managed > flag > project (off only) > user. -1 when nothing says (an org default we
+ * cannot read may still apply).
+ */
+export function resolveRemoteControl(args: string, set: RcSettings = {}): number {
+  if (set.managed !== undefined) return set.managed ? 1 : 0;
+  if (REMOTE_CONTROL.test(args)) return 1;
+  if (set.project === false) return 0;
+  if (set.user !== undefined) return set.user ? 1 : 0;
+  return -1;
+}
 const CLAUDE_ID = /--(?:session-id|resume)[ =]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
 
 /** Executable names that mean "Claude Code" on a machine: `claude` plus whatever its claude_cmd runs. */
@@ -103,6 +121,8 @@ export function isClaudeArgs(args: string, names: string[]): boolean {
 export function parseDiscovery(out: string, mark: string, names: string[]): Discovery {
   let home = '', ps = '', panes = '';
   const caps = new Map<string, string>(), realCwd = new Map<string, string>(), dirs = new Map<string, string>();
+  const rcSet = new Map<string, RcSettings>();
+  const tri = (v?: string) => (v === 'true' ? true : v === 'false' ? false : undefined);
   const pairs = (body: string, into: Map<string, string>) => {
     for (const l of body.split('\n')) { const [k, v] = l.split('\t'); if (k && v) into.set(k, v); }
   };
@@ -116,6 +136,12 @@ export function parseDiscovery(out: string, mark: string, names: string[]): Disc
     else if (head.startsWith('cap ')) caps.set(head.slice(4), body);
     else if (head === 'real') pairs(body, realCwd);
     else if (head === 'dirs') pairs(body, dirs);
+    else if (head === 'rc') {
+      for (const l of body.split('\n')) {
+        const [id, user, project, managed] = l.split('\t');
+        if (id) rcSet.set(id, { user: tri(user), project: tri(project), managed: tri(managed) });
+      }
+    }
   }
   const kids = new Map<number, number[]>(), args = new Map<number, string>();
   for (const l of ps.split('\n')) {
@@ -147,12 +173,15 @@ export function parseDiscovery(out: string, mark: string, names: string[]): Disc
     const a = hit.args;
     found.push({
       id, session, cwd: cwd.join('\t'), activity: Number(act) * 1000, pane: caps.get(id) ?? '',
-      claude_pid: hit.pid, claude_id: a.match(CLAUDE_ID)?.[1] ?? null, remote_control: REMOTE_CONTROL.test(a),
+      claude_pid: hit.pid, claude_id: a.match(CLAUDE_ID)?.[1] ?? null, remote_control: resolveRemoteControl(a, rcSet.get(id)),
       ...(realCwd.has(id) && { real_cwd: realCwd.get(id) }),
     });
   }
   return { home, panes: found, dirs };
 }
+
+/** Shell function: prints the value of remoteControlAtStartup in a settings file (never anything else from it). */
+export const RCVAL_SH = `rcval() { [ -r "$1" ] && grep -o '"remoteControlAtStartup"[[:space:]]*:[[:space:]]*[a-z]*' "$1" 2>/dev/null | head -1 | sed 's/.*:[[:space:]]*//'; }`;
 
 /**
  * Every pane on a machine that runs Claude Code, in one round trip (panes, process table, pane text).
@@ -162,7 +191,8 @@ export async function discover(m: Machine, dirs: string[] = []): Promise<Discove
   const mark = `@@cc-${randomBytes(12).toString('hex')}@@`; // random per call: pane text cannot forge records
   // $HOME can be unset in a service environment; fall back to the account's home directory.
   const dirLines = dirs.map((d) => `d=${q(d)}; case "$d" in "~") d=$H;; "~/"*) d="$H/\${d#"$t"}";; esac; printf '%s\\t%s\\n' ${q(d)} "$(realpath -e -- "$d" 2>/dev/null)"`).join('\n');
-  const r = await run(m, `t='~/'; H=\${HOME:-$(cd ~ 2>/dev/null && pwd -P)}
+  const r = await run(m, `${RCVAL_SH}
+    t='~/'; H=\${HOME:-$(cd ~ 2>/dev/null && pwd -P)}
     echo "${mark} home $H"; echo "${mark} ps"; ps -A -ww -o pid=,ppid=,args= 2>/dev/null
     echo "${mark} panes"
     tmux list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{session_activity}\t#{session_name}\t#{pane_current_path}' 2>/dev/null
@@ -170,6 +200,11 @@ export async function discover(m: Machine, dirs: string[] = []): Promise<Discove
     tmux list-panes -a -F '#{pane_id}\t#{pane_current_path}' 2>/dev/null | while IFS="$(printf '\\t')" read -r p c; do printf '%s\\t%s\\n' "$p" "$(realpath -e -- "$c" 2>/dev/null)"; done
     echo "${mark} dirs"
     ${dirLines}
+    echo "${mark} rc"
+    tmux list-panes -a -F '#{pane_id}\t#{pane_current_path}' 2>/dev/null | while IFS="$(printf '\\t')" read -r p c; do
+      pj=; for f in "$c/.claude/settings.local.json" "$c/.claude/settings.json"; do v=$(rcval "$f"); [ "$v" = false ] && pj=false; [ -z "$pj" ] && pj=$v; done
+      printf '%s\\t%s\\t%s\\t%s\\n' "$p" "$(rcval "$H/.claude/settings.json")" "$pj" "$(rcval /etc/claude-code/managed-settings.json)"
+    done
     tmux list-panes -a -F '#{pane_id}' 2>/dev/null | while read -r p; do echo "${mark} cap $p"; tmux capture-pane -p -J -t "$p" -S -30; done; true`, 8000);
   if (r.code === 255) throw unreachable(m);
   return parseDiscovery(r.stdout, mark, claudeNames(m));

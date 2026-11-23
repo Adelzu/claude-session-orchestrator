@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { adoptPanes, projectDirs } from '../adopt.ts';
 import { findMachine, findProject, projectDir, UserError, type Machine } from '../config.ts';
 import { injectContext, logSession } from './memory.ts';
-import { REMOTE_CONTROL_UNKNOWN, type SessionRow } from '../db.ts';
+import type { SessionRow } from '../db.ts';
 import { detectStatus, menuKeys, summarize, tail, type Status } from '../summarize.ts';
 import * as tmux from '../tmux.ts';
 import { deleteTranscript, lastTurn, readTranscript } from '../transcript.ts';
@@ -59,9 +59,8 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
       for (const r of mine.filter((x) => x.target && x.status !== 'stopped')) {
         const p = found?.panes.find((x) => x.id === r.target);
         if (!p) { ctx.db.setStatus(r.name, 'stopped'); continue; }
-        // The flag on the command line is the only reliable signal; without it we cannot know.
-        const rc = p.remote_control ? 1 : REMOTE_CONTROL_UNKNOWN;
-        if (rc !== r.remote_control) ctx.db.setRemoteControl(r.name, rc);
+        // Re-evaluated every scan from the process args and the settings on the machine.
+        if (p.remote_control !== r.remote_control) ctx.db.setRemoteControl(r.name, p.remote_control);
         const seen = detectStatus(p.pane);
         if (seen && seen !== r.status) ctx.db.setStatus(r.name, seen, r.last_message);
         // No hooks reach adopted sessions: a turn that no longer shows "esc to interrupt" has ended.

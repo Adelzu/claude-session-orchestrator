@@ -12,7 +12,7 @@ import { findProject, loadConfig, type Config, type Machine } from '../src/confi
 import { adoptPanes, matchProject } from '../src/adopt.ts';
 import { Db } from '../src/db.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { isClaudeArgs, newSessionCmd, parseDiscovery } from '../src/tmux.ts';
+import { isClaudeArgs, newSessionCmd, parseDiscovery, RCVAL_SH, resolveRemoteControl } from '../src/tmux.ts';
 
 test('q() survives quotes and shell metacharacters', () => {
   const nasty = `it's "x" $(rm -rf /) \`id\` ; | &`;
@@ -199,7 +199,7 @@ test('parseDiscovery keeps only panes with Claude Code in their process tree', (
   assert.equal(d.home, '/home/u');
   assert.equal(d.panes.length, 1);
   assert.deepEqual({ ...d.panes[0], pane: undefined }, {
-    id: '%1', session: 'work', cwd: '/home/u/projects/app/src', activity: 1700000000_000, pane: undefined, claude_pid: 101, claude_id: ID, remote_control: false,
+    id: '%1', session: 'work', cwd: '/home/u/projects/app/src', activity: 1700000000_000, pane: undefined, claude_pid: 101, claude_id: ID, remote_control: -1,
   });
   assert.match(d.panes[0].pane, /esc to interrupt/);
   assert.deepEqual(parseDiscovery(DISCOVERY.replaceAll(MARK, '@@other@@'), MARK, ['claude']).panes, []); // wrong marker: nothing forged
@@ -245,7 +245,7 @@ test('parseDiscovery: --remote-control / --rc, realpaths and resolved folders', 
     `${MARK} real`, '%1\t/real/x', `${MARK} dirs`, '~/lockfy\t/home/u/lockfy',
   ].join('\n') + '\n';
   const d = parseDiscovery(out, MARK, ['claude']);
-  assert.deepEqual(d.panes.map((p) => p.remote_control), [true, true, false]);
+  assert.deepEqual(d.panes.map((p) => p.remote_control), [1, 1, -1]);
   assert.deepEqual(d.panes.map((p) => p.real_cwd), ['/real/x', undefined, undefined]);
   assert.equal(d.dirs.get('~/lockfy'), '/home/u/lockfy');
 });
@@ -253,7 +253,7 @@ test('parseDiscovery: --remote-control / --rc, realpaths and resolved folders', 
 test('adoptPanes: records the flag (unknown, not false) and re-matches unassigned rows (same row)', () => {
   const m = { id: 'hub', projects_root: '~' } as Machine;
   const db = new Db(':memory:');
-  const pane = { id: '%1', session: 'mine', cwd: '/home/u/lockfy', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: false };
+  const pane = { id: '%1', session: 'mine', cwd: '/home/u/lockfy', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: -1 };
   const found = { home: '', panes: [pane], dirs: new Map<string, string>() };
   assert.equal(adoptPanes(cfgOf(), db, m, found).length, 1);
   let row = db.sessions()[0];
@@ -266,13 +266,13 @@ test('adoptPanes: records the flag (unknown, not false) and re-matches unassigne
   assert.equal(adoptPanes(cfg, db, m, found).length, 0, 'no duplicate');
   row = db.sessions()[0];
   assert.equal(row.project, 'lockfy');
-  adoptPanes(cfg, db, m, { ...found, panes: [{ ...pane, id: '%2', remote_control: true }] });
+  adoptPanes(cfg, db, m, { ...found, panes: [{ ...pane, id: '%2', remote_control: 1 }] });
   assert.equal(db.sessions().find((r) => r.target === '%2')!.remote_control, 1);
 });
 
 // ---- one row per session, however often or however concurrently we scan ----
 const hubM = { id: 'hub', projects_root: '~' } as Machine;
-const paneOf = (o: object = {}) => ({ id: '%1', session: 'mine', cwd: '/x', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: false, ...o });
+const paneOf = (o: object = {}) => ({ id: '%1', session: 'mine', cwd: '/x', activity: 0, pane: '', claude_pid: 7, claude_id: null, remote_control: -1, ...o });
 const scan = (db: Db, ...panes: object[]) => adoptPanes(cfgOf(), db, hubM, { home: '/h', panes: panes.map(paneOf), dirs: new Map() });
 const tmpDb = () => join(mkdtempSync(join(tmpdir(), 'orch-db-')), 'o.db');
 
@@ -336,4 +336,37 @@ test('Db startup removes duplicate adopted rows from earlier versions, keeping t
   const db = new Db(path);
   assert.deepEqual(db.sessions().map((r) => r.name).sort(), ['cc-p-0001', 'cc-p-0004']);
   assert.throws(() => new DatabaseSync(path).exec(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, target) VALUES ('x', 'hub', 'p', 'idle', 0, 1, '%1')`));
+});
+
+// ---- Remote Control: remoteControlAtStartup (user settings), repo-scoped can only turn it off, flags ----
+test('resolveRemoteControl: managed > flag > project(off only) > user, else unknown', () => {
+  assert.equal(resolveRemoteControl('claude', { user: true }), 1); // auto Remote Control, plain claude
+  assert.equal(resolveRemoteControl('claude', { user: false }), 0);
+  assert.equal(resolveRemoteControl('claude', { user: true, project: false }), 0); // project turns it off
+  assert.equal(resolveRemoteControl('claude', { user: false, project: true }), 0); // repo scope cannot enable it
+  assert.equal(resolveRemoteControl('claude --rc', { user: false }), 1); // flag beats user
+  assert.equal(resolveRemoteControl('claude --remote-control n', { user: true, project: false }), 1); // flag beats project
+  assert.equal(resolveRemoteControl('claude', { user: true, managed: false }), 0); // managed policy locks it
+  assert.equal(resolveRemoteControl('claude --rc', { managed: false }), 0);
+  assert.equal(resolveRemoteControl('claude', {}), -1);
+  assert.equal(resolveRemoteControl('claude'), -1);
+});
+
+test('parseDiscovery: per-pane settings feed remote_control', () => {
+  const out = [
+    `${MARK} home /home/u`, `${MARK} ps`, '  100     1 -bash', '  101   100 claude', '  200     1 -bash', '  201   200 claude', '  300     1 -bash', '  301   300 claude',
+    `${MARK} panes`, '%1\t100\t1\ta\t/x', '%2\t200\t1\tb\t/y', '%3\t300\t1\tc\t/z',
+    `${MARK} rc`, '%1\ttrue\t\t', '%2\ttrue\tfalse\t', '%3\t\t\t',
+  ].join('\n') + '\n';
+  assert.deepEqual(parseDiscovery(out, MARK, ['claude']).panes.map((p) => p.remote_control), [1, 0, -1]);
+});
+
+test('rcval shell function reads only remoteControlAtStartup', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-rc-'));
+  const f = (name: string, body: string) => { writeFileSync(join(dir, name), body); return join(dir, name); };
+  const rc = (file: string) => execFileSync('sh', ['-c', `${RCVAL_SH}; rcval ${q(file)}; true`]).toString().trim();
+  assert.equal(rc(f('a.json', '{\n  "remoteControlAtStartup": true,\n  "x": 1\n}')), 'true');
+  assert.equal(rc(f('b.json', '{"remoteControlAtStartup":false}')), 'false');
+  assert.equal(rc(f('c.json', '{"other": true}')), '');
+  assert.equal(rc(join(dir, 'missing.json')), '');
 });

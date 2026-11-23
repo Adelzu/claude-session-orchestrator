@@ -1,7 +1,7 @@
 // Adopting Claude Code sessions that run in tmux but were not started by the orchestrator.
 import { randomBytes } from 'node:crypto';
 import { projectDir, type Config, type Machine } from './config.ts';
-import { REMOTE_CONTROL_UNKNOWN, type Db } from './db.ts';
+import type { Db } from './db.ts';
 import { detectStatus } from './summarize.ts';
 import { SESSION_RE, type Discovery } from './tmux.ts';
 
@@ -57,7 +57,7 @@ export function adoptPanes(cfg: Config, db: Db, m: Machine, found: Discovery): s
     do name = `cc-${project}-${randomBytes(2).toString('hex')}`; while (db.session(name));
     // Insert, or update the row that already tracks this pane (rename, restart, stopped -> running,
     // unassigned -> a project that matches now).
-    db.adoptSession({ name, machine: m.id, project, status: detectStatus(p.pane) ?? 'idle', target: p.id, tmux_session: p.session, claude_id: p.claude_id, claude_pid: p.claude_pid, remote_control: p.remote_control ? 1 : REMOTE_CONTROL_UNKNOWN });
+    db.adoptSession({ name, machine: m.id, project, status: detectStatus(p.pane) ?? 'idle', target: p.id, tmux_session: p.session, claude_id: p.claude_id, claude_pid: p.claude_pid, remote_control: p.remote_control });
     if (!existing) added.push(name);
   }
   return added;
