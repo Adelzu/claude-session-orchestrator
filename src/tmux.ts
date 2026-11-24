@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { Machine } from './config.ts';
+import { UserError, type Machine } from './config.ts';
 import { q, qpath, run, runOk, unreachable } from './transport/ssh.ts';
 
 export const SESSION_RE = /^cc-[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -18,14 +18,41 @@ export type Ref = string | { name: string; target?: string | null };
 export const PANE_RE = /^%\d+$/;
 const pane = (r: Ref) => q(typeof r === 'string' ? `=${r}:` : r.target && PANE_RE.test(r.target) ? r.target : `=${r.name}:`);
 
+/**
+ * Shell prologue: ask tmux for its sessions and say whether a server answered. `no server running`
+ * is a real answer (nothing is alive); any other failure is "do not know". Sets $o (the session list).
+ */
+const serverCheck = (mark: string) => `o=$(tmux list-sessions -F '#{session_name} #{session_activity}' 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then srv=1
+    elif printf %s "$o" | grep -qE 'no server running|failed to connect to server|error connecting to .*(No such file|Connection refused)'; then srv=0; o=
+    else echo "${mark} tmuxerr"; exit 0; fi
+    echo "${mark} srv $srv"`;
+
+/**
+ * Did tmux positively answer? Returns whether a server runs (false: none, so nothing is alive).
+ * Throws when the answer is missing, failed or cut short: callers must then leave every status alone.
+ */
+export function checkAnswer(m: Machine, out: string, mark: string, ...need: string[]): boolean {
+  const unsure = () => new UserError(`tmux on ${m.id} gave no clear answer; statuses left as they were.`);
+  // Only whole lines count: the process table lists this very script, which contains every marker mid-line.
+  const line = (what: string) => out.match(new RegExp(`(?:^|\\n)${mark} ${what}(?:\\n|$)`));
+  if (line('tmuxerr')) throw unsure();
+  const srv = line('srv ([01])')?.[1];
+  if (!srv || !line('end')) throw unsure();
+  if (srv === '1' && need.some((n) => !line(n))) throw unsure();
+  return srv === '1';
+}
+
 /** Every cc-* session on a machine with its last 30 pane lines, in one round trip. */
 export async function snapshot(m: Machine): Promise<TmuxSession[]> {
   // Fresh random marker per call, so text shown in a pane cannot forge another session's record.
   const mark = `@@cc-${randomBytes(12).toString('hex')}@@`;
-  const r = await run(m, `{ tmux list-sessions -F '#{session_name} #{session_activity}'; tmux list-windows -a -F '#{session_name} #{window_activity}'; } 2>/dev/null |
+  const r = await run(m, `${serverCheck(mark)}
+    { printf '%s\\n' "$o"; tmux list-windows -a -F '#{session_name} #{window_activity}' 2>/dev/null; } |
     awk '($2 + 0) > (m[$1] + 0) { m[$1] = $2 } END { for (s in m) print s, m[s] }' | sort | grep '^cc-' |
-    while read -r s a; do echo "${mark} $s $a"; tmux capture-pane -p -J -t "=$s:" -S -30; done; true`);
+    while read -r s a; do echo "${mark} $s $a"; tmux capture-pane -p -J -t "=$s:" -S -30; done; echo "${mark} end"; true`);
   if (r.code === 255) throw unreachable(m);
+  checkAnswer(m, r.stdout, mark);
   const seen = new Set<string>();
   return r.stdout.split(`${mark} `).slice(1).map((chunk) => {
     const nl = chunk.indexOf('\n');
@@ -200,10 +227,11 @@ export async function discover(m: Machine, dirs: string[] = []): Promise<Discove
   // $HOME can be unset in a service environment; fall back to the account's home directory.
   const dirLines = dirs.map((d) => `d=${q(d)}; case "$d" in "~") d=$H;; "~/"*) d="$H/\${d#"$t"}";; esac; printf '%s\\t%s\\n' ${q(d)} "$(realpath -e -- "$d" 2>/dev/null)"`).join('\n');
   const r = await run(m, `${RCVAL_SH}
+    ${serverCheck(mark)}
     t='~/'; H=\${HOME:-$(cd ~ 2>/dev/null && pwd -P)}
-    echo "${mark} home $H"; echo "${mark} ps"; ps -A -ww -o pid=,ppid=,args= 2>/dev/null
+    echo "${mark} home $H"; echo "${mark} ps"; ps -A -ww -o pid=,ppid=,args= 2>/dev/null && echo "${mark} psok"
     echo "${mark} panes"
-    tmux list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{session_activity}\t#{window_activity}\t#{session_name}\t#{pane_current_path}' 2>/dev/null
+    [ $srv = 1 ] && tmux list-panes -a -F '#{pane_id}\t#{pane_pid}\t#{session_activity}\t#{window_activity}\t#{session_name}\t#{pane_current_path}' 2>/dev/null && echo "${mark} panesok"
     echo "${mark} real"
     tmux list-panes -a -F '#{pane_id}\t#{pane_current_path}' 2>/dev/null | while IFS="$(printf '\\t')" read -r p c; do printf '%s\\t%s\\n' "$p" "$(realpath -e -- "$c" 2>/dev/null)"; done
     echo "${mark} dirs"
@@ -213,7 +241,8 @@ export async function discover(m: Machine, dirs: string[] = []): Promise<Discove
       pj=; for f in "$c/.claude/settings.local.json" "$c/.claude/settings.json"; do v=$(rcval "$f"); [ "$v" = false ] && pj=false; [ -z "$pj" ] && pj=$v; done
       printf '%s\\t%s\\t%s\\t%s\\n' "$p" "$(rcval "$H/.claude/settings.json")" "$pj" "$(rcval /etc/claude-code/managed-settings.json)"
     done
-    tmux list-panes -a -F '#{pane_id}' 2>/dev/null | while read -r p; do echo "${mark} cap $p"; tmux capture-pane -p -J -t "$p" -S -30; done; true`, 8000);
+    tmux list-panes -a -F '#{pane_id}' 2>/dev/null | while read -r p; do echo "${mark} cap $p"; tmux capture-pane -p -J -t "$p" -S -30; done; echo "${mark} end"; true`, 8000);
   if (r.code === 255) throw unreachable(m);
+  checkAnswer(m, r.stdout, mark, 'psok', 'panesok');
   return parseDiscovery(r.stdout, mark, claudeNames(m));
 }

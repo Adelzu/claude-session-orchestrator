@@ -32,7 +32,7 @@ export function ingest(ctx: Ctx, session: string, machine: string, body: unknown
   }
   const before = ctx.db.session(session)!;
   const msg = (hook.message ?? hook.reason)?.slice(0, 500) ?? null;
-  ctx.db.setStatus(session, status, msg);
+  ctx.db.setStatus(session, status, msg, `hook ${hook.hook_event_name}${hook.reason ? ` (${hook.reason})` : ''}`);
   ctx.db.setTranscript(session, isSessionId(hook.session_id) ? hook.session_id : null, isTranscriptPath(hook.transcript_path) ? hook.transcript_path : null);
   ctx.db.addEvent(session, hook.hook_event_name!, status, msg);
   // Ended outside session_stop (e.g. /exit typed in the Claude app): log it in the background.

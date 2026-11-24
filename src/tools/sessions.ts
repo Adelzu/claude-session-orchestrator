@@ -72,6 +72,12 @@ async function trustFolder(m: Machine, dir: string): Promise<string | undefined>
 /** Last activity: the newest of what tmux saw and the row's last status change (hook events and scans). */
 export const lastActivity = (tmuxMs: number, statusSince: number | null | undefined) => Math.max(tmuxMs || 0, statusSince ?? 0);
 
+/** Machines whose last check failed (logged once per outage). */
+const unsure = new Set<string>();
+
+/** A row that stopped this recently may still be shutting down: never revive it. */
+const REVIVE_GRACE_MS = 15_000;
+
 export interface LiveSession extends SessionRow { reachable: boolean; last_activity: number | null }
 
 /**
@@ -82,11 +88,21 @@ export interface LiveSession extends SessionRow { reachable: boolean; last_activ
 export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promise<LiveSession[]> {
   const ms = machine ? [findMachine(ctx.cfg, machine)] : ctx.cfg.machines;
   const snaps = await Promise.all(ms.map(async (m) => {
-    const hasAdopted = ctx.db.sessions().some((r) => r.machine === m.id && r.target && r.status !== 'stopped');
     try {
-      const [live, found] = await Promise.all([tmux.snapshot(m), adopt || hasAdopted ? tmux.discover(m, projectDirs(ctx.cfg, m)) : null]);
+      const live = await tmux.snapshot(m);
+      const rows = ctx.db.sessions().filter((r) => r.machine === m.id);
+      // A stopped row whose tmux session still lives may have Claude Code running in it again.
+      const maybeBack = rows.some((r) => r.status === 'stopped' && live.some((s) => s.name === (r.target ? r.tmux_session : r.name)));
+      const hasAdopted = rows.some((r) => r.target && r.status !== 'stopped');
+      const found = adopt || hasAdopted || maybeBack ? await tmux.discover(m, projectDirs(ctx.cfg, m)) : null;
+      unsure.delete(m.id);
       return { m, live, found };
-    } catch { return { m, live: null, found: null }; }
+    } catch (e) {
+      // Unreachable, timed out, or tmux gave no clear answer: we do not know, so no status changes.
+      if (!unsure.has(m.id)) console.log(`refresh: ${m.id}: ${(e as Error).message} Statuses left unchanged.`);
+      unsure.add(m.id);
+      return { m, live: null, found: null };
+    }
   }));
   const out: LiveSession[] = [];
   for (const { m, live, found } of snaps) {
@@ -105,26 +121,38 @@ export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promis
           // Started outside the orchestrator: project is the middle of cc-<project>-<id>.
           ctx.db.upsertSession({ name: s.name, machine: m.id, project: projectOf(ctx, s.name), status: 'idle', remote_control: 0 });
         }
-        const row = ctx.db.session(s.name)!;
+        let row = ctx.db.session(s.name)!;
         const seen = detectStatus(s.pane);
+        // Stopped by a hook that did not mean it (SessionEnd on /clear, a lost event): Claude Code runs in its session again.
+        if (row.status === 'stopped' && Date.now() - row.status_since > REVIVE_GRACE_MS) {
+          const p = found?.panes.find((x) => x.session === s.name);
+          if (p) { ctx.db.setStatus(s.name, seen ?? 'idle', null, 'refresh: claude running in its tmux session'); row = ctx.db.session(s.name)!; }
+        }
         // Pane regex is the fallback for missed hooks; it only overrides when it sees something definite.
-        if (seen && seen !== row.status) ctx.db.setStatus(s.name, seen, row.last_message);
+        if (seen && row.status !== 'stopped' && seen !== row.status) ctx.db.setStatus(s.name, seen, row.last_message, 'refresh: pane');
         { const r = ctx.db.session(s.name)!; out.push({ ...r, reachable: true, last_activity: lastActivity(s.activity, r.status_since) }); }
         rows.delete(s.name);
       }
       for (const r of rows.values()) {
-        if (r.status !== 'stopped') ctx.db.setStatus(r.name, 'stopped');
+        if (r.status !== 'stopped') ctx.db.setStatus(r.name, 'stopped', null, 'refresh: tmux session is gone');
       }
       // Adopted panes: alive while Claude Code still runs in the pane.
+      for (const r of mine.filter((x) => x.target && x.status === 'stopped' && found && Date.now() - x.status_since > REVIVE_GRACE_MS)) {
+        const p = found!.panes.find((x) => x.id === r.target);
+        if (!p) continue;
+        ctx.db.reviveAdopted(r.name, detectStatus(p.pane) ?? 'idle', p.claude_id, p.claude_pid);
+        const cur = ctx.db.session(r.name)!;
+        out.push({ ...cur, reachable: true, last_activity: lastActivity(p.activity, cur.status_since) });
+      }
       for (const r of mine.filter((x) => x.target && x.status !== 'stopped')) {
         const p = found?.panes.find((x) => x.id === r.target);
-        if (!p) { ctx.db.setStatus(r.name, 'stopped'); continue; }
+        if (!p) { if (found) ctx.db.setStatus(r.name, 'stopped', null, 'refresh: no claude in its pane'); continue; }
         // Re-evaluated every scan from the process args and the settings on the machine.
         if (p.remote_control !== r.remote_control) ctx.db.setRemoteControl(r.name, p.remote_control);
         const seen = detectStatus(p.pane);
-        if (seen && seen !== r.status) ctx.db.setStatus(r.name, seen, r.last_message);
+        if (seen && seen !== r.status) ctx.db.setStatus(r.name, seen, r.last_message, 'refresh: pane');
         // No hooks reach adopted sessions: a turn that no longer shows "esc to interrupt" has ended.
-        else if (!seen && (r.status === 'working' || r.status === 'waiting_approval') && Date.now() - r.status_since > 5000) ctx.db.setStatus(r.name, 'idle');
+        else if (!seen && (r.status === 'working' || r.status === 'waiting_approval') && Date.now() - r.status_since > 5000) ctx.db.setStatus(r.name, 'idle', null, 'refresh: turn ended');
         { const cur = ctx.db.session(r.name)!; out.push({ ...cur, reachable: true, last_activity: lastActivity(p.activity, cur.status_since) }); }
       }
     } else {
@@ -159,7 +187,11 @@ export async function resolve(ctx: Ctx, name: string): Promise<SessionRow & { m:
   if (!row) {
     await refresh(ctx, undefined, true);
     row = lookup(ctx, name);
-  } else if (row.target && row.status !== 'stopped') {
+  } else if (row.status === 'stopped') {
+    // Claude Code may be running again (a stray SessionEnd, a lost hook): ask tmux before turning the caller away.
+    await refresh(ctx, row.machine, true);
+    row = ctx.db.session(row.name) ?? lookup(ctx, name);
+  } else if (row.target) {
     // Adopted pane: Claude Code may have exited to a shell since the last look. Never type into that.
     await refresh(ctx, row.machine);
     row = ctx.db.session(row.name)!;
@@ -222,10 +254,10 @@ async function waitTurn(ctx: Ctx, name: string, m: Machine, since: number, secon
     const pane = await tmux.capture(m, row ?? name, 30).catch(() => null);
     if (pane === null) return true; // session is gone
     const seen = detectStatus(pane);
-    if (seen === 'waiting_approval') { ctx.db.setStatus(name, 'waiting_approval'); return true; }
+    if (seen === 'waiting_approval') { ctx.db.setStatus(name, 'waiting_approval', null, 'pane (wait loop)'); return true; }
     quiet = seen === 'working' ? 0 : quiet + 1;
     if (quiet >= 2 && Date.now() - since > 4000) {
-      if (row?.target && row.status === 'working') ctx.db.setStatus(name, 'idle'); // adopted: no Stop hook
+      if (row?.target && row.status === 'working') ctx.db.setStatus(name, 'idle', null, 'pane (wait loop, no Stop hook)'); // adopted: no Stop hook
       return true;
     }
   }
@@ -362,7 +394,7 @@ export function register(server: McpServer, ctx: Ctx) {
       const s = await resolve(ctx, session);
       const sent = Date.now();
       await tmux.sendText(s.m, s, message);
-      ctx.db.setStatus(s.name, 'working');
+      ctx.db.setStatus(s.name, 'working', null, 'session_send');
       return (await sendAndWait(ctx, s, wait, sent)) ?? { summary: `Sent to ${s.project}.` };
     });
 
@@ -386,7 +418,7 @@ export function register(server: McpServer, ctx: Ctx) {
       const keys = menuKeys(pane, choice) ?? [{ yes: '1', always: '2', no: 'Escape' }[choice]];
       const sent = Date.now();
       await tmux.sendKeys(s.m, s, ...keys);
-      ctx.db.setStatus(s.name, choice === 'no' ? 'waiting_input' : 'working');
+      ctx.db.setStatus(s.name, choice === 'no' ? 'waiting_input' : 'working', null, 'session_approve');
       const turn = choice === 'no' ? null : await sendAndWait(ctx, s, wait, sent);
       return turn ? { ...turn, summary: `Answered ${choice}. ${turn.summary}` } : { summary: `Answered ${choice} for ${s.project}.` };
     });
@@ -396,7 +428,7 @@ export function register(server: McpServer, ctx: Ctx) {
     async ({ session }) => {
       const s = await resolve(ctx, session);
       await tmux.sendKeys(s.m, s, 'Escape');
-      ctx.db.setStatus(s.name, 'waiting_input');
+      ctx.db.setStatus(s.name, 'waiting_input', null, 'session_interrupt');
       return { summary: `Interrupted ${s.project}.` };
     });
 
@@ -407,7 +439,7 @@ export function register(server: McpServer, ctx: Ctx) {
       if (mode === 'kill' && confirm !== true) throw new UserError(`Killing ${s.name} needs confirm=true. Ask the user first.`);
       await writeLog(ctx, s, s.m); // while the pane still exists
       // Mark stopped first so the SessionEnd hook that /exit triggers does not log a second time.
-      ctx.db.setStatus(s.name, 'stopped');
+      ctx.db.setStatus(s.name, 'stopped', null, `session_stop ${mode}`);
       if (mode === 'kill') await tmux.kill(s.m, s);
       else await tmux.sendText(s.m, s, '/exit');
       return { summary: `${mode === 'kill' ? 'Killed' : 'Stopped'} ${s.project} on ${s.machine}.` };
@@ -437,7 +469,7 @@ export function register(server: McpServer, ctx: Ctx) {
           const live = !(r.target && r.status === 'stopped') && await tmux.capture(m, r, 1).then(() => true, () => false);
           if (live) {
             await writeLog(ctx, r, m);
-            ctx.db.setStatus(r.name, 'stopped'); // so the SessionEnd hook does not log twice
+            ctx.db.setStatus(r.name, 'stopped', null, 'session_delete'); // so the SessionEnd hook does not log twice
             await tmux.kill(m, r);
             killed++;
           }

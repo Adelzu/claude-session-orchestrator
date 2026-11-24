@@ -548,3 +548,76 @@ test('adopts Claude Code panes started outside the orchestrator (tmux, any sessi
     for (const s of ['mywork', 'cc-mywork', 'scratch', 'cc-scratch', 'plain']) execSync(`tmux kill-session -t '=${s}' 2>/dev/null || true`);
   }
 });
+
+test('stopped rows come back when Claude Code runs in tmux; an unclear tmux answer never stops anything', async () => {
+  const all = cfg.machines;
+  cfg.machines = all.filter((m) => m.id === 'node2');
+  const proj = join(tmp, 'proj', 'demo');
+  const age = (name: string) => db.db.prepare('UPDATE sessions SET status_since = ? WHERE name = ?').run(Date.now() - 60_000, name);
+  const status = (name: string) => db.session(name)!.status;
+  execSync(`tmux new-session -d -s cc-demo-r001 -c ${proj}/ '${FAKE}'`); // native: started by the orchestrator
+  execSync(`tmux new-session -d -s revadopt -c ${join(tmp, 'elsewhere')} '${FAKE}'`); // adopted
+  db.upsertSession({ name: 'cc-demo-r001', machine: 'node2', project: 'demo', status: 'idle', remote_control: 0 });
+  const oldPath = process.env.PATH;
+  try {
+    await wait(300);
+    await call('session_list'); // adopts revadopt as cc-revadopt
+    assert.equal(status('cc-revadopt'), 'idle');
+
+    // A SessionEnd that did not mean it (e.g. /clear): stopped, but only just now -> may be shutting down, left alone.
+    db.setStatus('cc-demo-r001', 'stopped', null, 'test');
+    await call('session_list');
+    assert.equal(status('cc-demo-r001'), 'stopped', 'grace period');
+    // Later, Claude Code is still running in the tmux session: back to idle (native row).
+    age('cc-demo-r001');
+    await call('session_list');
+    assert.equal(status('cc-demo-r001'), 'idle');
+    // Same for an adopted row.
+    db.setStatus('cc-revadopt', 'stopped', null, 'test'); age('cc-revadopt');
+    await call('session_list');
+    assert.equal(status('cc-revadopt'), 'idle');
+
+    // session_send re-checks tmux before rejecting a stopped row.
+    db.setStatus('cc-demo-r001', 'stopped', null, 'test'); age('cc-demo-r001');
+    const sent = await call('session_send', { session: 'cc-demo-r001', message: 'hi', wait: 0 });
+    assert.ok(!sent.err, sent.summary);
+    assert.notEqual(status('cc-demo-r001'), 'stopped');
+    db.setStatus('cc-revadopt', 'stopped', null, 'test'); age('cc-revadopt');
+    const sent2 = await call('session_send', { session: 'cc-revadopt', message: 'hi', wait: 0 });
+    assert.ok(!sent2.err, sent2.summary);
+
+    // tmux answers with something we cannot read (as during a network or system hiccup): nothing is marked stopped.
+    mkdirSync(join(tmp, 'badtmux'));
+    writeFileSync(join(tmp, 'badtmux', 'tmux'), '#!/bin/sh\necho "protocol version mismatch" >&2\nexit 1\n');
+    chmodSync(join(tmp, 'badtmux', 'tmux'), 0o755);
+    db.setStatus('cc-demo-r001', 'idle', null, 'test'); db.setStatus('cc-revadopt', 'idle', null, 'test');
+    process.env.PATH = `${join(tmp, 'badtmux')}:${oldPath}`;
+    await call('session_list');
+    assert.equal(status('cc-demo-r001'), 'idle');
+    assert.equal(status('cc-revadopt'), 'idle');
+    process.env.PATH = oldPath;
+
+    // tmux answers that the session is gone (native) or Claude Code exited in the pane (adopted): stopped, and not revived.
+    execSync(`tmux kill-session -t '=cc-demo-r001'`);
+    execSync(`tmux respawn-pane -k -t '=cc-revadopt:' 'cat'`);
+    await wait(300);
+    await call('session_list');
+    assert.equal(status('cc-demo-r001'), 'stopped');
+    assert.equal(status('cc-revadopt'), 'stopped');
+    age('cc-demo-r001'); age('cc-revadopt');
+    await call('session_list');
+    assert.equal(status('cc-demo-r001'), 'stopped');
+    assert.equal(status('cc-revadopt'), 'stopped');
+    assert.ok((await call('session_send', { session: 'cc-demo-r001', message: 'INJECTED', wait: 0 })).err);
+
+    // The whole tmux server gone is a clear answer too: nothing is alive.
+    db.setStatus('cc-demo-r001', 'idle', null, 'test');
+    execSync(`tmux kill-server`);
+    await call('session_list');
+    assert.equal(status('cc-demo-r001'), 'stopped');
+  } finally {
+    process.env.PATH = oldPath;
+    cfg.machines = all;
+    for (const s of ['cc-demo-r001', 'cc-revadopt', 'revadopt']) execSync(`tmux kill-session -t '=${s}' 2>/dev/null || true`);
+  }
+});

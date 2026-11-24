@@ -89,6 +89,8 @@ export class Db {
    */
   adoptSession(s: { name: string; machine: string; project: string; status: Status; target: string; tmux_session: string; claude_id: string | null; claude_pid: number | null; remote_control: number; tmux_orig?: string | null }) {
     const now = Date.now();
+    const was = this.adoptedRow(s.machine, s.target)?.status;
+    if (was === 'stopped' && s.status !== 'stopped') console.log(`status: ${s.name} stopped -> ${s.status} (adopt scan)`);
     this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, created, claude_id, claude_pid, target, tmux_session, tmux_orig)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (machine, target) WHERE target IS NOT NULL DO UPDATE SET
@@ -120,6 +122,12 @@ export class Db {
     return true;
   }
 
+  /** Claude Code runs in this adopted row's pane again (the row was stopped): back to `status`. */
+  reviveAdopted(name: string, status: Status, claudeId: string | null, claudePid: number | null) {
+    this.setStatus(name, status, null, 'refresh: claude running in its pane');
+    this.db.prepare(`UPDATE sessions SET claude_id = COALESCE(?, claude_id), claude_pid = COALESCE(?, claude_pid) WHERE name = ?`).run(claudeId, claudePid, name);
+  }
+
   setRemoteControl(name: string, value: number) {
     this.db.prepare(`UPDATE sessions SET remote_control = ? WHERE name = ?`).run(value, name);
   }
@@ -139,7 +147,10 @@ export class Db {
       .all(project) as unknown as SessionRow[];
   }
 
-  setStatus(name: string, status: Status, message: string | null = null) {
+  /** Every change of status is logged with its source (hook, refresh, discovery, stop, ...). */
+  setStatus(name: string, status: Status, message: string | null = null, source = 'unknown') {
+    const before = this.session(name)?.status;
+    if (before !== status) console.log(`status: ${name} ${before ?? '-'} -> ${status} (${source})`);
     this.db.prepare(`UPDATE sessions SET status = ?, status_since = ?, last_message = ? WHERE name = ?`)
       .run(status, Date.now(), message, name);
   }

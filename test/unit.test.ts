@@ -13,7 +13,7 @@ import { lastActivity } from '../src/tools/sessions.ts';
 import { adoptedName, adoptPanes, matchProject, projectDirs, type AdoptIo } from '../src/adopt.ts';
 import { Db } from '../src/db.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { isClaudeArgs, newSessionCmd, parseDiscovery, RCVAL_SH, resolveRemoteControl } from '../src/tmux.ts';
+import { checkAnswer, isClaudeArgs, newSessionCmd, parseDiscovery, RCVAL_SH, resolveRemoteControl } from '../src/tmux.ts';
 
 test('q() survives quotes and shell metacharacters', () => {
   const nasty = `it's "x" $(rm -rf /) \`id\` ; | &`;
@@ -519,4 +519,32 @@ test('rcval shell function reads only remoteControlAtStartup', () => {
   assert.equal(rc(f('b.json', '{"remoteControlAtStartup":false}')), 'false');
   assert.equal(rc(f('c.json', '{"other": true}')), '');
   assert.equal(rc(join(dir, 'missing.json')), '');
+});
+
+test('tmux answers: only a clear answer counts; failures, cut-off output and forged markers throw', () => {
+  const m = { id: 'hub' } as Machine, M = '@@cc-t@@';
+  assert.equal(checkAnswer(m, `${M} srv 1\n${M} psok\n${M} panesok\n${M} end\n`, M, 'psok', 'panesok'), true);
+  assert.equal(checkAnswer(m, `${M} srv 0\n${M} end\n`, M, 'psok', 'panesok'), false, 'no server running is a real answer: nothing is alive');
+  assert.throws(() => checkAnswer(m, `${M} tmuxerr\n`, M), /no clear answer/); // tmux failed some other way
+  assert.throws(() => checkAnswer(m, '', M), /no clear answer/); // empty output: not "everything is gone"
+  assert.throws(() => checkAnswer(m, `${M} srv 1\n`, M), /no clear answer/); // cut off before the end
+  assert.throws(() => checkAnswer(m, `${M} srv 1\n${M} end\n`, M, 'psok', 'panesok'), /no clear answer/); // ps or list-panes failed
+  // The process table lists the script itself, which contains every marker mid-line: that is not an answer.
+  const ps = `  12 1 sh -c echo "${M} srv 1"; echo "${M} psok"; echo "${M} end"\n`;
+  assert.throws(() => checkAnswer(m, ps, M, 'psok'), /no clear answer/);
+});
+
+test('Db.setStatus logs every change with its source, and nothing when the status stays', () => {
+  const db = new Db(':memory:'), lines: string[] = [], log = console.log;
+  db.upsertSession({ name: 'cc-a-0001', machine: 'hub', project: 'a', status: 'idle', remote_control: 0 });
+  console.log = (l: string) => { lines.push(l); };
+  try {
+    db.setStatus('cc-a-0001', 'stopped', null, 'hook SessionEnd (clear)');
+    db.setStatus('cc-a-0001', 'stopped', null, 'hook SessionEnd (clear)');
+    db.setStatus('cc-a-0001', 'idle', null, 'refresh: claude running in its tmux session');
+  } finally { console.log = log; }
+  assert.deepEqual(lines, [
+    'status: cc-a-0001 idle -> stopped (hook SessionEnd (clear))',
+    'status: cc-a-0001 stopped -> idle (refresh: claude running in its tmux session)',
+  ]);
 });
