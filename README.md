@@ -36,8 +36,8 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
 | `session_list(machine?)` | Status: `working`, `waiting_input`, `waiting_approval`, `idle` or `stopped` |
 | `session_start(project, machine?, prompt?, remote_control=true, name?, create?, repo?)` | Refreshes the shared context, then starts Claude Code in tmux in the project's own folder, named after the project (`cc-<project>`, then `cc-<project>-2`…). `create=true` registers a new project and gives it its own folder and git repo (or clones `repo`) |
 | `session_read(session, mode=reply\|summary\|tail)` | `reply` (default): the latest reply text, tools used and files changed, read from Claude Code's own transcript; or a short terminal status, or the cleaned terminal text |
-| `session_send(session, message, wait=45)` | Types a message, presses Enter, and waits for the reply in the same call |
-| `session_wait(session, seconds=60)` | Waits for a working session to finish its turn, then returns its reply |
+| `session_send(session, message, wait=45)` | Types a message, presses Enter, and waits for the reply in the same call (`wait` max 300 s) |
+| `session_wait(session, seconds=60)` | Waits for a working session to finish its turn, then returns its reply (`seconds` max 300) |
 | `session_approve(session, yes\|no\|always, wait=30)` | Answers the menu on screen (tool permissions, trust dialogs) and waits for what happens next |
 | `session_interrupt(session)` / `session_stop(session, graceful\|kill, confirm?)` | Esc / `/exit`, or kill (kill needs `confirm=true`) |
 | `session_delete(session \| all_stopped, delete_transcript?, confirm)` | Cleanup: stop if running and forget the session; optionally delete its Claude Code transcript |
@@ -103,7 +103,7 @@ To use it from the Claude app or voice mode, publish `/mcp` through a Cloudflare
 
 ## Hosted mode (beta)
 
-Instead of exposing your own server, sign in to the hosted service with GitHub or Google, and let your hub **dial out** to it:
+Instead of exposing your own server, sign in to the hosted service with GitHub or Google (only people on its allowlists), and let your hub **dial out** to it:
 
 1. In Claude, add a custom connector with the service's `/mcp` URL and sign in.
 2. Open `/dashboard` on the service, create an agent token, and add it to your hub's `.env`:
@@ -114,6 +114,8 @@ Instead of exposing your own server, sign in to the hosted service with GitHub o
 3. Run `npm start` as usual. The agent connects out (nothing listens publicly) and serves the same 25 tools to your signed-in account only.
 
 The hosted part, in `worker/`, is a Cloudflare Worker. It handles OAuth 2.1 with `@cloudflare/workers-oauth-provider`, runs a stateless `/mcp` endpoint, and keeps one Durable Object per user holding that user's agent connection. It stores no tool arguments, sessions, keys or notes. Those stay on your machine. See [worker/README.md](worker/README.md) to deploy your own.
+
+Sign-in is locked down: a provider (GitHub, Google) is enabled only when both its client id and secret are set; each has its own allowlist (`ALLOWED_GITHUB_IDS`, `ALLOWED_GOOGLE_EMAILS` with verified emails only); an empty or unset list denies everyone, and with no provider configured nobody can sign in. A dashboard Users panel to manage the lists is planned. Details in [worker/README.md](worker/README.md#who-can-sign-in).
 
 ## Configuration
 
@@ -158,6 +160,7 @@ The TypeScript runs directly on Node (type stripping); there is no build step. `
 ## Design notes and limits
 
 - **Stateless MCP over HTTP.** Each request gets a fresh server, and all state lives in SQLite (`node:sqlite`).
+- **Wait limits.** A tool's `wait` is capped at 300 s, and every hop above it waits longer so the tool's own wait is the real limit: the hub's forwarded-call timeout is 330 s (`src/cloud.ts`), and the hosted worker's agent wait is 360 s (`worker/src/hub.ts`). The Claude app's own client timeout is outside our control.
 - **Status** comes from hooks first. The pane is a fallback for prompts that fire no hook, and it only overrides on clear signals.
 - **Approving prompts:** numbered menus get the digit, and unnumbered dialogs get arrow keys plus Enter, based on the menu read off the screen.
 - **Laptop power:** nothing ever wakes a sleeping laptop. A Mac on battery counts as unavailable for `requires_ac` endpoints.

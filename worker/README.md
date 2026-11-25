@@ -22,6 +22,25 @@ npx wrangler secret put GOOGLE_CLIENT_ID; npx wrangler secret put GOOGLE_CLIENT_
 npx wrangler deploy
 ```
 
+## Who can sign in
+
+Sign-in is locked down in two layers. Both must pass.
+
+1. **Providers are enabled only when fully configured.** GitHub needs `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`;
+   Google needs `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. A provider missing either value has no sign-in button, and
+   its authorize, login and callback routes refuse the request before any call to the provider. With no provider
+   configured, the sign-in pages say sign-in is not configured and nobody can sign in.
+2. **Per-provider allowlists, default deny.** Set these as Worker variables or secrets (comma-separated):
+   - `ALLOWED_GITHUB_IDS`: numeric GitHub user ids. Empty or unset: nobody signs in with GitHub.
+   - `ALLOWED_GOOGLE_EMAILS`: exact email addresses, compared lowercased. Google must also report `email_verified: true`.
+     Unverified, unlisted, or missing emails are denied. Empty or unset: nobody signs in with Google.
+
+A user's identity is `github-<id>` or `google-<sub>`, never an email, so renaming an account cannot move anyone
+into another tenant. The lists are read on every sign-in; changing one needs no redeploy of code, only the variable.
+
+Planned (a proposal, not built): an owner-only "Users" section in the dashboard to add and remove people on both lists
+instead of editing variables. See `docs/plans/approve-and-file-share.md`.
+
 The OAuth apps' callback URL is `https://<worker-host>/callback`, for both GitHub and Google.
 
 ## Develop
