@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from '../../src/db.ts';
 import { FileTransfers, limits, revoke, share } from '../../src/tools/files.ts';
-import { Download, decodeFrame } from '../src/files.ts';
+import { Download, decodeFrame, responseHeaders } from '../src/files.ts';
 
 const setup = (bytes: number) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'relay-')));
@@ -21,7 +21,7 @@ const setup = (bytes: number) => {
 };
 
 /** One download over a fake socket: agent frames go to the Download, the Download's acks/cancels go to the agent. */
-const connect = (ctx: never, lim: ReturnType<typeof limits>, shareId: string, req: { range?: string } = {}) => {
+const connect = (ctx: never, lim: ReturnType<typeof limits>, shareId: string, req: { range?: string; inline?: boolean } = {}) => {
   const id = crypto.randomUUID();
   const ft: FileTransfers = new FileTransfers(ctx, {
     send: (d) => {
@@ -38,7 +38,7 @@ const connect = (ctx: never, lim: ReturnType<typeof limits>, shareId: string, re
     },
   }, () => lim);
   const dl = new Download(id, (m) => queueMicrotask(() => void ft.onMessage(m as never)));
-  void ft.onMessage({ type: 'file', id, share: shareId, range: req.range });
+  void ft.onMessage({ type: 'file', id, share: shareId, range: req.range, inline: req.inline });
   return dl;
 };
 
@@ -96,4 +96,25 @@ test('relay: revoke while downloading errors the body stream', async () => {
   await reader.read();
   revoke(ctx as never, shareId);
   await assert.rejects(async () => { for (;;) { const r = await reader.read(); if (r.done) return; await new Promise((x) => setTimeout(x, 2)); } }, /revoked/);
+});
+
+test('relay: inline view of an image is served inline, of an HTML file still as a download (both ends enforce it)', async () => {
+  const { ctx, lim, root } = setup(10) as ReturnType<typeof setup> & { root: string };
+  const dir = join(lim.roots[0]!);
+  writeFileSync(join(dir, 'pic.png'), randomBytes(2000));
+  writeFileSync(join(dir, 'page.html'), '<script>alert(1)</script>');
+  const png = share(ctx, join(dir, 'pic.png'), 30, Date.now(), lim, 'https://orch.example');
+  const html = share(ctx, join(dir, 'page.html'), 30, Date.now(), lim, 'https://orch.example');
+  const a = connect(ctx as never, lim, png.id, { inline: true });
+  const ha = responseHeaders((await a.head).headers);
+  assert.equal(ha.get('content-type'), 'image/png');
+  assert.match(ha.get('content-disposition')!, /^inline/);
+  assert.equal(ha.get('x-content-type-options'), 'nosniff');
+  await readAll(a);
+  const b = connect(ctx as never, lim, html.id, { inline: true });
+  const hb = responseHeaders((await b.head).headers);
+  assert.equal(hb.get('content-type'), 'application/octet-stream');
+  assert.match(hb.get('content-disposition')!, /^attachment/);
+  await readAll(b);
+  void root;
 });

@@ -68,7 +68,7 @@ export class UserHub extends DurableObject<Env> {
     this.downloads.set(id, dl);
     dl.onClosed = () => this.downloads.delete(id);
     const head = request.method === 'HEAD';
-    ws.send(JSON.stringify({ type: 'file', id, share: shareId, range: request.headers.get('range') ?? undefined, ifRange: request.headers.get('if-range') ?? undefined, head }));
+    ws.send(JSON.stringify({ type: 'file', id, share: shareId, range: request.headers.get('range') ?? undefined, ifRange: request.headers.get('if-range') ?? undefined, head, inline: request.headers.get('x-inline') === '1' }));
     const h = await dl.head;
     if (h.status >= 400 && h.status !== 416) return new Response(h.message ?? 'Not available.', { status: h.status, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } });
     return new Response(head || h.status === 416 ? null : dl.body, { status: h.status, headers: responseHeaders(h.headers) });

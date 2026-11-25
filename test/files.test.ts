@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Db } from '../src/db.ts';
 import { UserError } from '../src/config.ts';
 import type { Ctx } from '../src/tools/common.ts';
-import { FileTransfers, WINDOW_BYTES, checkPath, limits, list, open, parseRange, revoke, safeName, share, baseUrl, type Limits } from '../src/tools/files.ts';
+import { FileTransfers, WINDOW_BYTES, checkPath, cleanTag, inlineType, limits, list, open, parseRange, revoke, revokeGroup, safeName, share, baseUrl, type Limits } from '../src/tools/files.ts';
 
 const BASE = 'https://orch.example';
 const setup = () => {
@@ -71,7 +71,7 @@ test('share: ttl bounds, default, list, revoke, expiry', () => {
   assert.equal(s.expires, now + 30 * 60_000);
   assert.match(s.id, /^[A-Za-z0-9_-]{22}$/);
   assert.equal(s.url, `${BASE}/f/${s.id}/a.txt`);
-  const max = share(ctx, join(root, 'a.txt'), 1440, now, lim, BASE);
+  const max = share(ctx, join(root, 'sub', 'b.bin'), 1440, now, lim, BASE);
   assert.equal(max.expires, now + 24 * 3600_000);
   assert.equal(list(ctx, now, BASE).length, 2);
   assert.equal(list(ctx, now + 31 * 60_000, BASE).length, 1); // the 30 min one has expired
@@ -225,4 +225,75 @@ test('FileTransfers: cancel stops sending; revoke cuts a running download; close
   f3.closeAll();
   await d3;
   assert.ok(!p3.json().some((m) => m.type === 'file-end'));
+});
+
+// ---- inline viewing, groups ----
+test('inlineType: images, PDF and plain text only; never HTML or SVG', () => {
+  assert.equal(inlineType('a.PNG'), 'image/png');
+  assert.equal(inlineType('a.jpeg'), 'image/jpeg');
+  assert.equal(inlineType('a.pdf'), 'application/pdf');
+  assert.equal(inlineType('notes.txt'), 'text/plain; charset=utf-8');
+  for (const bad of ['a.html', 'a.htm', 'a.svg', 'a.svgz', 'a.xml', 'a.js', 'a.xhtml', 'a.exe', 'a', 'a.png.html']) assert.equal(inlineType(bad), undefined, bad);
+});
+
+test('open inline: safe types get inline + their own type; unsafe types stay downloads', async () => {
+  const { root, lim, ctx } = setup();
+  writeFileSync(join(root, 'p.png'), 'not really a png');
+  writeFileSync(join(root, 'page.html'), '<script>alert(1)</script>');
+  writeFileSync(join(root, 'pic.svg'), '<svg onload="alert(1)"/>');
+  writeFileSync(join(root, 'n.txt'), 'hello');
+  const now = Date.now();
+  const png = share(ctx, join(root, 'p.png'), 30, now, lim, BASE);
+  const html = share(ctx, join(root, 'page.html'), 30, now, lim, BASE);
+  const svg = share(ctx, join(root, 'pic.svg'), 30, now, lim, BASE);
+  const txt = share(ctx, join(root, 'n.txt'), 30, now, lim, BASE);
+  const a = open(ctx, png.id, { inline: true }, now, lim);
+  assert.equal(a.headers['content-type'], 'image/png');
+  assert.match(a.headers['content-disposition']!, /^inline; filename="p\.png"/);
+  a.close?.();
+  const t = open(ctx, txt.id, { inline: true }, now, lim);
+  assert.equal(t.headers['content-type'], 'text/plain; charset=utf-8');
+  assert.match(t.headers['content-disposition']!, /^inline/);
+  t.close?.();
+  for (const id of [html.id, svg.id]) {
+    const o = open(ctx, id, { inline: true }, now, lim);
+    assert.equal(o.headers['content-type'], 'application/octet-stream');
+    assert.match(o.headers['content-disposition']!, /^attachment/);
+    o.close?.();
+  }
+  // Without the inline flag even an image downloads.
+  const d = open(ctx, png.id, {}, now, lim);
+  assert.match(d.headers['content-disposition']!, /^attachment/);
+  assert.equal(d.headers['content-type'], 'application/octet-stream');
+  d.close?.();
+});
+
+test('groups and labels: validated, listed, same file again updates instead of duplicating', () => {
+  const { root, lim, ctx } = setup();
+  const now = 5_000_000;
+  const a = share(ctx, join(root, 'a.txt'), 30, now, lim, BASE, { group: 'watermark-samples-1', label: '1920x1080' });
+  const b = share(ctx, join(root, 'sub', 'b.bin'), 30, now, lim, BASE, { group: 'watermark-samples-1', label: '2560x1440' });
+  const l = list(ctx, now, BASE);
+  assert.deepEqual(l.map((f) => [f.group, f.label]).sort(), [['watermark-samples-1', '1920x1080'], ['watermark-samples-1', '2560x1440']]);
+  const again = share(ctx, join(root, 'a.txt'), 120, now + 1000, lim, BASE, { group: 'other', label: 'x' });
+  assert.equal(again.id, a.id);
+  assert.equal(list(ctx, now, BASE).length, 2);
+  assert.equal(list(ctx, now, BASE).find((f) => f.id === a.id)?.group, 'other');
+  assert.equal(list(ctx, now, BASE).find((f) => f.id === a.id)?.expires, now + 1000 + 120 * 60_000);
+  refuses(() => share(ctx, join(root, 'a.txt'), 30, now, lim, BASE, { group: 'bad/group' }), /group/);
+  refuses(() => share(ctx, join(root, 'a.txt'), 30, now, lim, BASE, { group: 'x'.repeat(61) }), /group/);
+  refuses(() => share(ctx, join(root, 'a.txt'), 30, now, lim, BASE, { label: '1920x1080' }), /needs a group/);
+  assert.equal(cleanTag('  ', 'group', 60), null);
+  assert.equal(cleanTag('ok name-1.2', 'group', 60), 'ok name-1.2');
+  assert.ok(b.id);
+});
+
+test('revokeGroup revokes only that group', () => {
+  const { root, lim, ctx } = setup();
+  const now = 7_000_000;
+  share(ctx, join(root, 'a.txt'), 30, now, lim, BASE, { group: 'g1' });
+  share(ctx, join(root, 'sub', 'b.bin'), 30, now, lim, BASE, { group: 'g2' });
+  assert.equal(revokeGroup(ctx, 'g1', now), 1);
+  assert.equal(revokeGroup(ctx, 'g1', now), 0);
+  assert.deepEqual(list(ctx, now, BASE).map((f) => f.group), ['g2']);
 });

@@ -38,6 +38,17 @@ export const safeName = (name: string) => {
   return n || 'file';
 };
 
+/**
+ * Types that may open inside the browser: images, PDF and plain text. Chosen by file extension, never from the content.
+ * HTML, SVG and anything else is never inline: it stays an attachment, so a shared file cannot run script on our origin.
+ */
+export const INLINE_TYPES: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', avif: 'image/avif',
+  pdf: 'application/pdf',
+  txt: 'text/plain; charset=utf-8', log: 'text/plain; charset=utf-8', md: 'text/plain; charset=utf-8', csv: 'text/plain; charset=utf-8', json: 'text/plain; charset=utf-8',
+};
+export const inlineType = (name: string) => INLINE_TYPES[(/\.([A-Za-z0-9]+)$/.exec(name)?.[1] ?? '').toLowerCase()];
+
 const hasDotPart = (rel: string) => rel.split(sep).some((c) => c.startsWith('.'));
 
 /** Validate a path against the limits. Returns the real path and its size; throws UserError. */
@@ -61,7 +72,7 @@ export function checkPath(path: string, lim: Limits): { real: string; size: numb
   return { real, size: st.size, mtimeMs: st.mtimeMs };
 }
 
-interface ShareRow { id: string; path: string; name: string; size: number; created: number; expires: number; revoked: number }
+interface ShareRow { id: string; path: string; name: string; size: number; created: number; expires: number; revoked: number; grp: string | null; label: string | null }
 
 const live = (ctx: Ctx, now = Date.now()) =>
   ctx.db.db.prepare(`SELECT * FROM shares WHERE revoked = 0 AND expires > ? ORDER BY created DESC`).all(now) as unknown as ShareRow[];
@@ -75,18 +86,37 @@ export function baseUrl(env: NodeJS.ProcessEnv = process.env): string | null {
 
 const urlOf = (base: string, s: { id: string; name: string }) => `${base}/f/${s.id}/${encodeURIComponent(s.name)}`;
 
-export function share(ctx: Ctx, path: string, ttlMin = DEFAULT_TTL_MIN, now = Date.now(), lim = limits(), base = baseUrl()) {
+/** Group and label are short plain tags (letters, digits, space, _ . -) so they are safe to show and to put in a URL. */
+export function cleanTag(v: string | undefined | null, what: string, max: number): string | null {
+  const t = (v ?? '').trim();
+  if (!t) return null;
+  if (t.length > max || !/^\w[\w .-]*$/.test(t)) throw new UserError(`${what} must be up to ${max} letters, digits, spaces, _ . or -.`);
+  return t;
+}
+
+export function share(ctx: Ctx, path: string, ttlMin = DEFAULT_TTL_MIN, now = Date.now(), lim = limits(), base = baseUrl(), meta: { group?: string; label?: string } = {}) {
   if (!base) throw new UserError('File sharing needs agent mode (ORCH_CLOUD_URL) so the dashboard can serve the file.');
   if (!Number.isInteger(ttlMin) || ttlMin < 1 || ttlMin > MAX_TTL_MIN) throw new UserError(`ttl_minutes must be 1 to ${MAX_TTL_MIN} (24 h).`);
+  const grp = cleanTag(meta.group, 'group', 60);
+  const label = cleanTag(meta.label, 'label', 40);
+  if (label && !grp) throw new UserError('A label needs a group.');
   const { real, size } = checkPath(path, lim);
-  const row: ShareRow = { id: randomBytes(16).toString('base64url'), path: real, name: safeName(real), size, created: now, expires: now + ttlMin * 60_000, revoked: 0 };
-  ctx.db.db.prepare(`INSERT INTO shares (id, path, name, size, created, expires, revoked) VALUES (?, ?, ?, ?, ?, ?, 0)`)
-    .run(row.id, row.path, row.name, row.size, row.created, row.expires);
+  // Sharing the same file again updates its group, label and expiry instead of adding a second link.
+  const same = ctx.db.db.prepare(`SELECT * FROM shares WHERE path = ? AND revoked = 0 AND expires > ? LIMIT 1`).get(real, now) as ShareRow | undefined;
+  if (same) {
+    const expires = now + ttlMin * 60_000;
+    ctx.db.db.prepare(`UPDATE shares SET grp = ?, label = ?, expires = ?, size = ? WHERE id = ?`).run(grp, label, expires, size, same.id);
+    const row = { ...same, grp, label, expires, size };
+    return { ...row, url: urlOf(base, row) };
+  }
+  const row: ShareRow = { id: randomBytes(16).toString('base64url'), path: real, name: safeName(real), size, created: now, expires: now + ttlMin * 60_000, revoked: 0, grp, label };
+  ctx.db.db.prepare(`INSERT INTO shares (id, path, name, size, created, expires, revoked, grp, label) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`)
+    .run(row.id, row.path, row.name, row.size, row.created, row.expires, row.grp, row.label);
   return { ...row, url: urlOf(base, row) };
 }
 
 export function list(ctx: Ctx, now = Date.now(), base = baseUrl()) {
-  return live(ctx, now).map((s) => ({ id: s.id, name: s.name, size: s.size, expires: s.expires, url: base ? urlOf(base, s) : null }));
+  return live(ctx, now).map((s) => ({ id: s.id, name: s.name, size: s.size, expires: s.expires, group: s.grp, label: s.label, url: base ? urlOf(base, s) : null }));
 }
 
 const active = new Map<string, Set<AbortController>>();
@@ -95,6 +125,12 @@ export function revoke(ctx: Ctx, id: string): boolean {
   const r = ctx.db.db.prepare(`UPDATE shares SET revoked = 1 WHERE id = ? AND revoked = 0`).run(id);
   for (const c of active.get(id) ?? []) c.abort(); // running downloads stop too
   return Number(r.changes) > 0;
+}
+
+/** Revoke every live share in a group (running downloads stop too). Returns how many were revoked. */
+export function revokeGroup(ctx: Ctx, group: string, now = Date.now()): number {
+  const ids = (ctx.db.db.prepare(`SELECT id FROM shares WHERE grp = ? AND revoked = 0 AND expires > ?`).all(group, now) as { id: string }[]).map((r) => r.id);
+  return ids.filter((id) => revoke(ctx, id)).length;
 }
 
 /** Parse a single `bytes=a-b` range. Anything else (multi-range, other units) is ignored: the full file is served. */
@@ -116,7 +152,7 @@ export function parseRange(header: string | undefined, size: number): { start: n
 export interface Opened { status: number; headers: Record<string, string>; message?: string; stream?: Readable; signal?: AbortSignal; close?: () => void }
 
 /** Resolve one download request. Everything is checked again here, so a stale or revoked share never serves. */
-export function open(ctx: Ctx, id: string, opts: { range?: string; ifRange?: string; head?: boolean } = {}, now = Date.now(), lim = limits()): Opened {
+export function open(ctx: Ctx, id: string, opts: { range?: string; ifRange?: string; head?: boolean; inline?: boolean } = {}, now = Date.now(), lim = limits()): Opened {
   const fail = (status: number, message: string): Opened => ({ status, headers: {}, message });
   const row = ctx.db.db.prepare(`SELECT * FROM shares WHERE id = ?`).get(id) as ShareRow | undefined;
   if (!row || row.revoked || row.expires <= now) return fail(404, 'This file is not shared (any more).');
@@ -128,6 +164,11 @@ export function open(ctx: Ctx, id: string, opts: { range?: string; ifRange?: str
     'content-disposition': `attachment; filename="${row.name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(row.name)}`,
     'last-modified': new Date(info.mtimeMs).toUTCString(),
   };
+  const view = opts.inline ? inlineType(row.name) : undefined; // unsafe types fall back to a plain download
+  if (view) {
+    headers['content-type'] = view;
+    headers['content-disposition'] = `inline; filename="${row.name.replace(/[^\x20-\x7e"\\]/g, '_')}"`;
+  }
   let range = parseRange(opts.range, info.size);
   if (opts.ifRange && opts.ifRange !== etag) range = 'full'; // the file changed: send it all
   if (range === 'unsatisfiable') return { status: 416, headers: { ...headers, 'content-range': `bytes */${info.size}` } };
@@ -150,7 +191,7 @@ interface Transfer { sent: number; acked: number; cancelled: boolean; wake?: () 
 
 /**
  * Serves the worker's file requests over the agent socket. Frames (the worker has the same format):
- *   worker -> agent: {type:'file', id, share, range?, ifRange?, head?} | {type:'ack', id, bytes} | {type:'cancel', id}
+ *   worker -> agent: {type:'file', id, share, range?, ifRange?, head?, inline?} | {type:'ack', id, bytes} | {type:'cancel', id}
  *   agent -> worker: {type:'file-head', id, status, headers} then binary frames (36-byte request id + data),
  *                    then {type:'file-end', id} or {type:'file-error', id, message}
  */
@@ -163,7 +204,7 @@ export class FileTransfers {
 
   handles(type: unknown) { return type === 'file' || type === 'ack' || type === 'cancel'; }
 
-  async onMessage(msg: { type?: string; id?: string; share?: string; range?: string; ifRange?: string; head?: boolean; bytes?: number }) {
+  async onMessage(msg: { type?: string; id?: string; share?: string; range?: string; ifRange?: string; head?: boolean; inline?: boolean; bytes?: number }) {
     const id = msg.id;
     if (typeof id !== 'string' || id.length !== 36) return;
     if (msg.type === 'ack') {
@@ -180,11 +221,11 @@ export class FileTransfers {
   /** Connection lost: stop every running transfer. */
   closeAll() { for (const t of this.transfers.values()) { t.cancelled = true; t.close?.(); t.wake?.(); } }
 
-  private async serve(id: string, share: string, msg: { range?: string; ifRange?: string; head?: boolean }) {
+  private async serve(id: string, share: string, msg: { range?: string; ifRange?: string; head?: boolean; inline?: boolean }) {
     const t: Transfer = { sent: 0, acked: 0, cancelled: false };
     this.transfers.set(id, t);
     try {
-      const o = open(this.ctx, share, { range: msg.range, ifRange: msg.ifRange, head: msg.head }, Date.now(), this.lim());
+      const o = open(this.ctx, share, { range: msg.range, ifRange: msg.ifRange, head: msg.head, inline: msg.inline === true }, Date.now(), this.lim());
       t.close = o.close;
       o.signal?.addEventListener('abort', () => t.wake?.()); // a revoke must also free a transfer that waits for an ack
       this.peer.send(JSON.stringify({ type: 'file-head', id, status: o.status, headers: o.headers, message: o.message }));
@@ -213,23 +254,34 @@ const humanSize = (n: number) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} 
 
 export function register(server: McpServer, ctx: Ctx) {
   tool(server, ctx, 'file_share',
-    'Share one file from the hub machine for download. Returns a link that works only for the signed-in owner (dashboard sign-in); nothing is stored in the cloud. Allowed folders only, no dotfiles, size cap. Default 30 minutes, max 24 h.',
-    { path: z.string().describe('Absolute path (or ~/...) of the file on the hub'), ttl_minutes: z.number().int().min(1).max(MAX_TTL_MIN).default(DEFAULT_TTL_MIN).describe('How long the link works, 1 to 1440 minutes') },
-    async ({ path, ttl_minutes }) => {
-      const s = share(ctx, path, ttl_minutes);
-      return { summary: `Shared ${s.name} (${humanSize(s.size)}) for ${ttl_minutes} minutes. Open it signed in: ${s.url}`, id: s.id, name: s.name, size: s.size, expires: new Date(s.expires).toISOString(), url: s.url };
+    'Share one file from the hub for viewing or download. Returns a link that works only for the signed-in owner (dashboard sign-in); nothing is stored in the cloud. Allowed folders only, no dotfiles, size cap. Default 30 minutes, max 24 h. Optional group (and label) collect files in the dashboard; sharing the same file again updates it.',
+    {
+      path: z.string().describe('Absolute path (or ~/...) of the file on the hub'),
+      ttl_minutes: z.number().int().min(1).max(MAX_TTL_MIN).default(DEFAULT_TTL_MIN).describe('How long the link works, 1 to 1440 minutes'),
+      group: z.string().max(60).optional().describe('Group name shown together in the dashboard, e.g. watermark-samples-1'),
+      label: z.string().max(40).optional().describe('Sub-label inside the group, e.g. 1920x1080 (needs a group)'),
+    },
+    async ({ path, ttl_minutes, group, label }) => {
+      const s = share(ctx, path, ttl_minutes, undefined, undefined, undefined, { group, label });
+      return { summary: `Shared ${s.name} (${humanSize(s.size)}) for ${ttl_minutes} minutes${s.grp ? ` in group ${s.grp}` : ''}. Open it signed in: ${s.url}`, id: s.id, name: s.name, size: s.size, group: s.grp, label: s.label, expires: new Date(s.expires).toISOString(), url: s.url };
     });
 
-  tool(server, ctx, 'file_list', 'List the files currently shared (name, size, expiry, link).', {},
+  tool(server, ctx, 'file_list', 'List the files currently shared (name, size, expiry, group, label, link).', {},
     async () => {
       const files = list(ctx).map((f) => ({ ...f, expires: new Date(f.expires).toISOString() }));
       return { summary: files.length ? `${files.length} file${files.length === 1 ? '' : 's'} shared.` : 'No files are shared.', files };
     });
 
-  tool(server, ctx, 'file_revoke', 'Stop sharing a file now; a download in progress is cut.',
-    { id: z.string().min(8).max(64).describe('Share id from file_list') },
-    async ({ id }) => {
-      if (!revoke(ctx, id)) throw new UserError('No such active share.');
-      return { summary: 'Share revoked.' };
+  tool(server, ctx, 'file_revoke', 'Stop sharing now: one file by id, or a whole group by name. A download in progress is cut.',
+    { id: z.string().min(8).max(64).optional().describe('Share id from file_list'), group: z.string().max(60).optional().describe('Group name: revokes every file in it') },
+    async ({ id, group }) => {
+      if (!!id === !!group) throw new UserError('Give either id or group.');
+      if (group) {
+        const n = revokeGroup(ctx, group);
+        if (!n) throw new UserError('No active share in that group.');
+        return { summary: `Revoked ${n} file${n === 1 ? '' : 's'} in group ${group}.`, revoked: n };
+      }
+      if (!revoke(ctx, id!)) throw new UserError('No such active share.');
+      return { summary: 'Share revoked.', revoked: 1 };
     });
 }

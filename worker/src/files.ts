@@ -17,15 +17,62 @@ export function decodeFrame(buf: ArrayBuffer): { id: string; data: Uint8Array } 
   return /^[0-9a-f-]{36}$/.test(id) ? { id, data: new Uint8Array(buf, REQ_ID_LEN) } : null;
 }
 
+export const parseViewPath = (pathname: string): string | null =>
+  /^\/view\/([A-Za-z0-9_-]{16,64})(?:\/[^/]*)?$/.exec(pathname)?.[1] ?? null;
+
+/** What the dashboard offers for a file, by extension (the hub decides again; HTML and SVG are never viewable). */
+export type ViewKind = 'image' | 'pdf' | 'text' | null;
+export const viewKind = (name: string): ViewKind =>
+  /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(name) ? 'image' : /\.pdf$/i.test(name) ? 'pdf' : /\.(txt|log|md|csv|json)$/i.test(name) ? 'text' : null;
+
+/** Types that may be served inline. Anything else is forced to a download here, whatever the agent said. */
+export const SAFE_INLINE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif', 'application/pdf', 'text/plain; charset=utf-8']);
+
+export interface FileRow { id: string; name: string; size: number; expires: number; group: string | null; label: string | null }
+export interface ViewItem { id: string; name: string; label: string | null }
+const byLabelName = (a: FileRow, b: FileRow) => (a.label ?? '').localeCompare(b.label ?? '') || a.name.localeCompare(b.name);
+
+/** Named groups A-Z, then the ungrouped files; inside a group: sub-labels A-Z, files A-Z. */
+export function groupFiles(items: FileRow[]): { name: string | null; labels: { label: string | null; items: FileRow[] }[] }[] {
+  const groups = new Map<string | null, FileRow[]>();
+  for (const f of [...items].sort(byLabelName)) groups.set(f.group, [...(groups.get(f.group) ?? []), f]);
+  const names = [...groups.keys()].sort((a, b) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)));
+  return names.map((name) => {
+    const labels: { label: string | null; items: FileRow[] }[] = [];
+    for (const f of groups.get(name)!) {
+      const last = labels.at(-1);
+      if (last && last.label === f.label) last.items.push(f); else labels.push({ label: f.label, items: [f] });
+    }
+    return { name, labels };
+  });
+}
+
+/** The images the viewer steps through: those in the same group as `id` (or the ungrouped ones), in display order. */
+export function carouselOf(items: FileRow[], id: string): { items: ViewItem[]; index: number } | null {
+  const me = items.find((f) => f.id === id);
+  if (!me) return null;
+  const list = items.filter((f) => f.group === me.group && viewKind(f.name) === 'image').sort(byLabelName);
+  const index = list.findIndex((f) => f.id === id);
+  return index < 0 ? null : { items: list.map((f) => ({ id: f.id, name: f.name, label: f.label })), index };
+}
+
 const PASS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'content-disposition', 'last-modified'];
 
 /** Only known headers from the agent pass through; the security headers are ours. */
 export function responseHeaders(from: Record<string, string>): Headers {
   const h = new Headers();
   for (const k of PASS) if (typeof from[k] === 'string') h.set(k, from[k]);
+  // Inline only for the safe types; anything else is a download, even if the agent asked for inline.
+  const type = h.get('content-type') ?? '';
+  const inline = /^inline/i.test(h.get('content-disposition') ?? '') && SAFE_INLINE.has(type);
+  if (!inline) {
+    h.set('content-type', 'application/octet-stream');
+    h.set('content-disposition', (h.get('content-disposition') ?? 'attachment').replace(/^inline/i, 'attachment'));
+  }
   h.set('cache-control', 'private, no-store');
   h.set('x-content-type-options', 'nosniff');
-  h.set('content-security-policy', "default-src 'none'; sandbox");
+  // PDF viewers do not work inside a CSP sandbox; everything else gets it.
+  if (!(inline && type === 'application/pdf')) h.set('content-security-policy', "default-src 'none'; sandbox");
   return h;
 }
 

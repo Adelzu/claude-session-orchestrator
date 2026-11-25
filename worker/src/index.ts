@@ -9,8 +9,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { authorizeUrl, exchange, providers, type Provider } from './identity.ts';
-import { consentPage, dashboardPage, homePage, messagePage, privacyPage, sectionFor, signInPage, type DashData } from './pages.ts';
-import { parseFilePath } from './files.ts';
+import { SECTIONS, consentPage, dashboardPage, defaultSection, homePage, messagePage, privacyPage, sectionFor, signInPage, viewerPage, type DashData } from './pages.ts';
+import { carouselOf, parseFilePath, parseViewPath, viewKind } from './files.ts';
 import { SETTINGS_KEY, generateLoginPath, publicRoute, resolveSettings, validateChange, type Resolved, type Stored } from './settings.ts';
 import { UserHub, type ToolInfo } from './hub.ts';
 
@@ -141,20 +141,38 @@ async function fetchFiles(stub: ReturnType<typeof hub>, online: boolean): Promis
   if (!online) return { ok: false, items: [], error: 'Your agent is offline, so shared files cannot be listed.' };
   const r = (await stub.call('file_list', {}, 8000)) as unknown as { content?: { text?: string }[]; isError?: boolean } | null;
   try {
-    const j = JSON.parse(r?.content?.[0]?.text ?? '') as { summary?: string; files?: { id: string; name: string; size: number; expires: string }[] };
+    const j = JSON.parse(r?.content?.[0]?.text ?? '') as { summary?: string; files?: { id: string; name: string; size: number; expires: string; group?: string | null; label?: string | null }[] };
     if (r?.isError || !Array.isArray(j.files)) return { ok: false, items: [], error: j.summary ?? 'Files are unavailable.' };
-    return { ok: true, items: j.files.map((f) => ({ id: String(f.id), name: String(f.name), size: Number(f.size), expires: Date.parse(f.expires) })) };
+    return { ok: true, items: j.files.map((f) => ({ id: String(f.id), name: String(f.name), size: Number(f.size), expires: Date.parse(f.expires), group: f.group ?? null, label: f.label ?? null })) };
   } catch {
     return { ok: false, items: [], error: 'The agent did not return a file list. Is it up to date?' };
   }
 }
 
-async function dashboardResponse(env: Env, origin: string, session: Props, active: string, s: Resolved, extra: { newToken?: string; flash?: string; settingsError?: string; status?: number } = {}) {
+const DONE: Record<string, string> = { revoked: 'Share revoked.', group: 'Group deleted.', failed: 'Could not revoke: it is already gone, or the agent is offline.' };
+/** file_revoke on the agent; true when it revoked something. */
+async function revokeFiles(stub: ReturnType<typeof hub>, args: { id: string } | { group: string }): Promise<boolean> {
+  const r = (await stub.call('file_revoke', args, 8000)) as unknown as { isError?: boolean } | null;
+  return !!r && !r.isError;
+}
+
+async function dashboardResponse(env: Env, origin: string, session: Props, active: string, s: Resolved, extra: { newToken?: string; flash?: string; settingsError?: string; status?: number; confirmId?: string; confirmGroup?: string } = {}) {
   const stub = hub(env, session.userId);
   const status = await stub.status();
   const data: DashData = { origin, user: session, owner: isOwner(env, session.userId), active, status, tokens: [], newToken: extra.newToken ?? null, files: null, settings: null, flash: extra.flash ?? null };
   if (active === 'machines') data.tokens = await listTokens(env, session.userId);
-  if (active === 'files') data.files = await fetchFiles(stub, status.online);
+  if (active === 'files') {
+    data.files = await fetchFiles(stub, status.online);
+    const items = data.files.items;
+    if (extra.confirmGroup) {
+      const n = items.filter((f) => f.group === extra.confirmGroup).length;
+      data.confirm = n ? { group: extra.confirmGroup, name: extra.confirmGroup, count: n } : null;
+    } else if (extra.confirmId) {
+      const f = items.find((x) => x.id === extra.confirmId);
+      data.confirm = f ? { id: f.id, name: f.name, count: 1 } : null;
+    }
+    if (!data.confirm && (extra.confirmId || extra.confirmGroup)) data.flash = 'That share is already gone.';
+  }
   if (active === 'settings' && data.owner) data.settings = { resolved: s, error: extra.settingsError };
   return html(dashboardPage(data), extra.status ?? 200);
 }
@@ -257,15 +275,40 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (!session) return set.hidden ? notFound() : html(messagePage('Sign in at the dashboard first, then open this link again.', footer), 401);
     const headers = new Headers();
     for (const h of ['range', 'if-range']) { const v = request.headers.get(h); if (v) headers.set(h, v); }
+    if (url.searchParams.get('inline') === '1') headers.set('x-inline', '1'); // the hub still decides: safe types only
     // The user's own Durable Object: an id from someone else's hub can never resolve here.
     return hub(env, session.userId).fetch(new Request(`https://hub/file/${fileId}`, { method: request.method, headers }));
+  }
+
+  const viewId = parseViewPath(url.pathname);
+  if (viewId && request.method === 'GET') {
+    if (!session) return set.hidden ? notFound() : html(messagePage('Sign in at the dashboard first, then open this link again.', footer), 401);
+    const stub = hub(env, session.userId);
+    const files = await fetchFiles(stub, (await stub.status()).online);
+    const me = files.items.find((x) => x.id === viewId);
+    if (!me) return html(messagePage(files.ok ? 'This file is not shared (any more).' : (files.error ?? 'Files are unavailable.'), true), 404);
+    if (viewKind(me.name) !== 'image') return Response.redirect(`${url.origin}/f/${encodeURIComponent(me.id)}/${encodeURIComponent(me.name)}?inline=1`, 302);
+    const car = carouselOf(files.items, viewId)!;
+    return html(viewerPage(car.items, car.index));
+  }
+
+  // /dashboard opens Setup until a token exists, Machines while no machine is connected and nothing is shared, else Files.
+  if (url.pathname === '/dashboard' && request.method === 'GET') {
+    if (!session) return signedOut();
+    const [tokens, status] = await Promise.all([listTokens(env, session.userId), hub(env, session.userId).status()]);
+    const to = defaultSection({ tokens: tokens.length, online: status.online, files: 0 });
+    return Response.redirect(`${url.origin}${SECTIONS.find((x) => x.id === to)!.path}`, 302);
   }
 
   const sec = sectionFor(url.pathname);
   if (sec && request.method === 'GET') {
     if (!session) return signedOut();
     if (sec.ownerOnly && !isOwner(env, session.userId)) return notFound();
-    return dashboardResponse(env, url.origin, session, sec.id, set);
+    const q = url.searchParams;
+    const extra = sec.id === 'files'
+      ? { flash: DONE[q.get('done') ?? ''], confirmId: q.get('revoke') ?? undefined, confirmGroup: q.get('revoke_group') ?? undefined }
+      : {};
+    return dashboardResponse(env, url.origin, session, sec.id, set, extra);
   }
   if (url.pathname.startsWith('/dashboard/') && request.method === 'POST') {
     // CSRF: same-origin form posts only (plus SameSite=Lax session cookie).
@@ -281,9 +324,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return Response.redirect(`${url.origin}/dashboard/machines`, 303);
     }
     if (url.pathname === '/dashboard/files/revoke') {
-      const id = String(form.get('id') ?? '');
-      if (/^[A-Za-z0-9_-]{8,64}$/.test(id)) await hub(env, session.userId).call('file_revoke', { id }, 8000);
-      return Response.redirect(`${url.origin}/dashboard/files`, 303);
+      const id = String(form.get('id') ?? ''), group = String(form.get('group') ?? '');
+      const stub = hub(env, session.userId);
+      const done = /^[\w][\w .-]{0,59}$/.test(group) ? ((await revokeFiles(stub, { group })) ? 'group' : 'failed')
+        : /^[A-Za-z0-9_-]{8,64}$/.test(id) ? ((await revokeFiles(stub, { id })) ? 'revoked' : 'failed') : 'failed';
+      return Response.redirect(`${url.origin}/dashboard/files?done=${done}`, 303);
     }
     if (url.pathname === '/dashboard/settings') {
       if (!isOwner(env, session.userId)) return notFound();

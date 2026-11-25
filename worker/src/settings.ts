@@ -13,7 +13,7 @@ export interface Resolved {
 
 export const SETTINGS_KEY = 'cso:settings';
 // Paths the service itself uses; a login path may never shadow them.
-const RESERVED = new Set(['dashboard', 'login', 'authorize', 'callback', 'token', 'register', 'agent', 'mcp', 'privacy', 'f', 'favicon.ico', 'robots.txt']);
+const RESERVED = new Set(['dashboard', 'login', 'authorize', 'callback', 'token', 'register', 'agent', 'mcp', 'privacy', 'f', 'view', 'favicon.ico', 'robots.txt']);
 const OFF = /^(0|off|false|no)$/i;
 
 /** `/abc-12345` or `abc-12345` -> `/abc-12345`; one segment of 8 to 64 URL-safe characters, never a reserved name. */

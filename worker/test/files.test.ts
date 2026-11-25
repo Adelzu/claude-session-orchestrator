@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Download, decodeFrame, expiresIn, humanSize, parseFilePath, responseHeaders } from '../src/files.ts';
+import { Download, SAFE_INLINE, carouselOf, decodeFrame, expiresIn, groupFiles, humanSize, parseFilePath, parseViewPath, responseHeaders, viewKind } from '../src/files.ts';
 
 const ID = '11111111-2222-3333-4444-555555555555';
 const frame = (id: string, data: number[]) => { const b = new Uint8Array(36 + data.length); b.set(new TextEncoder().encode(id)); b.set(data, 36); return b.buffer; };
@@ -109,4 +109,61 @@ test('Download: no head within the wait gives a 504', async () => {
   // the first wait is fixed at 15 s; failing it directly is what the timer does
   d.fail('The agent stopped sending.', 504);
   assert.equal((await d.head).status, 504);
+});
+
+test('parseViewPath', () => {
+  assert.equal(parseViewPath('/view/abcdefghijklmnopqrstuv/a.png'), 'abcdefghijklmnopqrstuv');
+  assert.equal(parseViewPath('/view/abcdefghijklmnopqrstuv'), 'abcdefghijklmnopqrstuv');
+  assert.equal(parseViewPath('/view/x/a.png'), null);
+  assert.equal(parseViewPath('/f/abcdefghijklmnopqrstuv'), null);
+});
+
+test('viewKind: images, pdf, text; never html or svg', () => {
+  assert.equal(viewKind('a.PNG'), 'image'); assert.equal(viewKind('a.jpeg'), 'image'); assert.equal(viewKind('a.webp'), 'image');
+  assert.equal(viewKind('a.pdf'), 'pdf'); assert.equal(viewKind('a.txt'), 'text'); assert.equal(viewKind('a.log'), 'text');
+  for (const bad of ['a.html', 'a.svg', 'a.xml', 'a.exe', 'a', 'a.png.html']) assert.equal(viewKind(bad), null, bad);
+});
+
+test('responseHeaders: inline only for safe types, otherwise forced to a download', () => {
+  const ok = responseHeaders({ 'content-type': 'image/png', 'content-disposition': 'inline; filename="a.png"' });
+  assert.equal(ok.get('content-type'), 'image/png');
+  assert.match(ok.get('content-disposition')!, /^inline/);
+  assert.equal(ok.get('x-content-type-options'), 'nosniff');
+  assert.match(ok.get('content-security-policy')!, /sandbox/);
+  for (const type of ['text/html', 'text/html; charset=utf-8', 'image/svg+xml', 'application/xhtml+xml', 'application/octet-stream', 'text/plain']) {
+    const h = responseHeaders({ 'content-type': type, 'content-disposition': 'inline; filename="x"' });
+    assert.equal(h.get('content-type'), 'application/octet-stream', type);
+    assert.match(h.get('content-disposition')!, /^attachment/, type);
+    assert.equal(h.get('x-content-type-options'), 'nosniff');
+  }
+  // no content-disposition at all: still a download
+  assert.match(responseHeaders({ 'content-type': 'image/png' }).get('content-disposition')!, /^attachment/);
+  // PDFs may be inline but cannot live under a CSP sandbox
+  const pdf = responseHeaders({ 'content-type': 'application/pdf', 'content-disposition': 'inline; filename="a.pdf"' });
+  assert.match(pdf.get('content-disposition')!, /^inline/);
+  assert.equal(pdf.get('content-security-policy'), null);
+  assert.equal(pdf.get('x-content-type-options'), 'nosniff');
+  assert.ok(![...SAFE_INLINE].some((t) => /html|svg|xml|javascript/.test(t)));
+});
+
+const R = (id: string, name: string, group: string | null, label: string | null) => ({ id, name, size: 1, expires: 1, group, label });
+
+test('groupFiles: groups A-Z, ungrouped last, labels A-Z, files A-Z', () => {
+  const g = groupFiles([R('4', 'z.txt', null, null), R('3', 'b.png', 'beta', '2560x1440'), R('2', 'a.png', 'alpha', '1920x1080'), R('1', 'S02.png', 'alpha', '1920x1080'), R('5', 'S00.png', 'alpha', '2560x1440')]);
+  assert.deepEqual(g.map((x) => x.name), ['alpha', 'beta', null]);
+  assert.deepEqual(g[0]!.labels.map((l) => [l.label, l.items.map((i) => i.name)]), [['1920x1080', ['a.png', 'S02.png']], ['2560x1440', ['S00.png']]]);
+});
+
+test('carouselOf: only images of the same group, in display order, with the right index', () => {
+  const items = [
+    R('a', 'S00.png', 'g', '1920x1080'), R('b', 'S02.png', 'g', '1920x1080'), R('c', 'S00.png', 'g', '2560x1440'),
+    R('d', 'doc.pdf', 'g', '2560x1440'), R('e', 'other.png', 'h', null), R('f', 'solo.png', null, null),
+  ];
+  const c = carouselOf(items, 'c')!;
+  assert.deepEqual(c.items.map((i) => i.id), ['a', 'b', 'c']);
+  assert.equal(c.index, 2);
+  assert.equal(carouselOf(items, 'e')!.items.length, 1);
+  assert.equal(carouselOf(items, 'f')!.items.length, 1); // ungrouped: only the ungrouped images
+  assert.equal(carouselOf(items, 'd'), null);            // a PDF has no carousel
+  assert.equal(carouselOf(items, 'nope'), null);
 });

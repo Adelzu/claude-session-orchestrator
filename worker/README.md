@@ -43,9 +43,14 @@ instead of editing variables. See `docs/plans/approve-and-file-share.md`.
 
 ## Dashboard
 
-`/dashboard` has a sidebar (tabs on phones) with one section per page: **Setup** (connector URL, getting started),
-**Machines** (agent online status, create and revoke tokens), **Files** (files your agent shares: download, revoke) and,
-for owners, **Settings**. Sections are small modules in `src/pages.ts` (`SECTIONS`), so Users or Approvals can be added later.
+`/dashboard` has a sidebar (tabs on phones) with one section per page: **Files** (files your agent shares, grouped; view, download,
+revoke with a confirm step), **Setup** (connector URL, getting started), **Machines** (agent online status, create and revoke
+tokens) and, for owners, **Settings**. `/dashboard` opens Setup until a token exists, Machines while no machine is connected and
+nothing is shared, and Files otherwise. Sections are small modules in `src/pages.ts` (`SECTIONS`), so Users or Approvals can be added later.
+
+Images open in a full-screen viewer (`/view/<id>`) at actual size (one image pixel per device pixel) with a fit toggle, previous/next
+arrows, arrow keys and swipe through the file's group, and a counter and name. PDF and plain text open inline; HTML and SVG never do
+(the hub and the Worker both enforce an allowlist of types, and every response carries `X-Content-Type-Options: nosniff`).
 
 Files are served at `/f/<id>/<name>` to the signed-in owner only (the same session cookie as the dashboard). The Worker asks
 your own Durable Object, which streams the bytes from your agent over its WebSocket. Nothing is stored in R2 or KV.

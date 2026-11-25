@@ -49,6 +49,9 @@ export class Db {
     for (const col of ['claude_id TEXT', 'transcript TEXT', 'created INTEGER', 'target TEXT', 'tmux_session TEXT', 'claude_pid INTEGER', 'tmux_orig TEXT']) {
       try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
     }
+    for (const col of ['grp TEXT', 'label TEXT']) {
+      try { this.db.exec(`ALTER TABLE shares ADD COLUMN ${col}`); } catch { /* already there */ }
+    }
     // One row per adopted pane: machine + tmux pane id. Duplicates from earlier versions go first
     // (oldest row wins), or the unique index below could not be created.
     const removed = this.dedupeAdopted();

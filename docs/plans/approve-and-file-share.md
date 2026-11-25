@@ -53,6 +53,13 @@ Open notes for Adel
 - Only files on the hub itself (the agent's machine), not other machines.
 - Cloudflare limits on very long streams are untested until deployed.
 
+### Viewer, groups, default tab (DECIDED by Adel, built)
+- Inline view (`?inline=1`): images, PDF, plain text only, by extension, enforced on the hub and again on the Worker; HTML/SVG never.
+  Images open in `/view/<id>`: 100% (CSS size = natural / devicePixelRatio), fit toggle, carousel over the group (arrows, keys, swipe at the image edge).
+- `file_share(..., group?, label?)`; the dashboard groups files, sub-headings by label; "View all", "Delete group" with a confirm page.
+  Revoke of one file also goes through a confirm page. Sharing the same path again updates group/label/expiry.
+- `/dashboard` redirects: no tokens -> Setup; tokens but agent offline and nothing shared -> Machines; else Files. Nav: Files, Setup, Machines, Settings.
+
 ## 3. Admin panel for who may sign in (PROPOSAL, not decided)
 
 Placement (Adel): a section/tab of the existing worker dashboard, owner-only, not a separate /admin app.

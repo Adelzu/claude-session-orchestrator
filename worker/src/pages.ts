@@ -1,6 +1,6 @@
 import type { ConsentDescription } from '@cloudflare/workers-oauth-provider';
 import type { Provider } from './identity.ts';
-import { expiresIn, humanSize } from './files.ts';
+import { expiresIn, groupFiles, humanSize, viewKind, type FileRow, type ViewItem } from './files.ts';
 import type { Resolved } from './settings.ts';
 
 const esc = (v: string) => v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -76,7 +76,7 @@ ${providers.map((p) => `<a class="btn primary" href="${esc(href(p))}">Sign in wi
 interface Session { userId: string; name: string }
 interface TokenRow { id: string; label: string; created: number }
 interface Status { online: boolean; since: number | null; tools: number }
-export interface FileRow { id: string; name: string; size: number; expires: number }
+export type { FileRow, ViewItem };
 
 export interface DashData {
   origin: string; user: Session; owner: boolean; active: string; status: Status | null;
@@ -84,6 +84,7 @@ export interface DashData {
   files: { ok: boolean; items: FileRow[]; error?: string } | null;
   settings: { resolved: Resolved; error?: string } | null;
   flash: string | null;
+  confirm?: { id?: string; group?: string; name: string; count: number } | null;
 }
 
 const when = (ts: number) => new Date(ts).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
@@ -95,7 +96,7 @@ const when = (ts: number) => new Date(ts).toISOString().replace('T', ' ').slice(
 interface Section { id: string; title: string; path: string; ownerOnly?: boolean; render: (d: DashData) => string }
 
 const setup: Section = {
-  id: 'setup', title: 'Setup', path: '/dashboard',
+  id: 'setup', title: 'Setup', path: '/dashboard/setup',
   render: (d) => `<h1>Setup</h1>
 <div class="card"><h2>Connector URL</h2><p class="muted">In Claude, add a custom connector with this address, then sign in.</p>
 <pre class="copy">${esc(d.origin)}/mcp</pre></div>
@@ -129,16 +130,37 @@ ${rows ? `<ul class="list">${rows}</ul>` : '<p class="muted">No tokens yet.</p>'
   },
 };
 
+const enc = encodeURIComponent;
+const fileRow = (x: FileRow) => {
+  const kind = viewKind(x.name);
+  const open = kind === 'image' ? `<a class="btn" href="/view/${enc(x.id)}/${enc(x.name)}">View</a>`
+    : kind ? `<a class="btn" href="/f/${enc(x.id)}/${enc(x.name)}?inline=1" target="_blank" rel="noopener">Open</a>` : '';
+  return `<li class="row"><span class="grow"><strong>${esc(x.name)}</strong><br><span class="muted">${humanSize(x.size)} · expires in ${esc(expiresIn(x.expires))}</span></span>
+${open}<a class="btn" href="/f/${enc(x.id)}/${enc(x.name)}">Download</a>
+<a class="btn" href="/dashboard/files?revoke=${enc(x.id)}">Revoke</a></li>`;
+};
+
 const files: Section = {
   id: 'files', title: 'Files', path: '/dashboard/files',
   render: (d) => {
     const f = d.files;
-    const rows = (f?.items ?? []).map((x) => `<li class="row"><span class="grow"><strong>${esc(x.name)}</strong><br><span class="muted">${humanSize(x.size)} · expires in ${esc(expiresIn(x.expires))}</span></span>
-<a class="btn" href="/f/${encodeURIComponent(x.id)}/${encodeURIComponent(x.name)}">Download</a>
-<form method="post" action="/dashboard/files/revoke"><input type="hidden" name="id" value="${esc(x.id)}"><button>Revoke</button></form></li>`).join('');
+    const c = d.confirm;
+    const confirm = c ? `<div class="card warn"><strong>${c.group ? `Delete the group "${esc(c.group)}"?` : `Revoke ${esc(c.name)}?`}</strong>
+<p>${c.group ? `This stops sharing all ${c.count} file${c.count === 1 ? '' : 's'} in it now` : 'This stops sharing it now'} and cuts running downloads. The files on your machine are kept.</p>
+<form method="post" action="/dashboard/files/revoke" class="inline"><input type="hidden" name="${c.group ? 'group' : 'id'}" value="${esc(c.group ?? c.id ?? '')}">
+<button class="primary">${c.group ? 'Yes, delete group' : 'Yes, revoke'}</button><a class="btn" href="/dashboard/files">Cancel</a></form></div>` : '';
+    const groups = groupFiles(f?.items ?? []).map((g) => {
+      const body = g.labels.map((l) => `${l.label ? `<h3>${esc(l.label)}</h3>` : ''}<ul class="list">${l.items.map(fileRow).join('')}</ul>`).join('');
+      if (g.name === null) return `${groupFiles(f?.items ?? []).length > 1 ? '<h2 class="other">Other files</h2>' : ''}${body}`;
+      const first = g.labels.flatMap((l) => l.items).find((x) => viewKind(x.name) === 'image');
+      const n = g.labels.reduce((t, l) => t + l.items.length, 0);
+      return `<section class="card group"><div class="grouphead"><h2 class="grow">${esc(g.name)} <span class="muted">· ${n} file${n === 1 ? '' : 's'}</span></h2>
+${first ? `<a class="btn" href="/view/${enc(first.id)}/${enc(first.name)}">View all</a>` : ''}<a class="btn" href="/dashboard/files?revoke_group=${enc(g.name)}">Delete group</a></div>${body}</section>`;
+    }).join('');
     return `<h1>Files</h1>
-<p class="muted">Files your agent shares for download. They stream from your machine to this browser and are never stored here. Ask Claude to share one (file_share).</p>
-${!f || !f.ok ? `<div class="card warn">${esc(f?.error ?? 'Files are unavailable.')}</div>` : rows ? `<ul class="list">${rows}</ul>` : '<p class="muted">Nothing is shared right now.</p>'}`;
+<p class="muted">Files your agent shares. They stream from your machine to this browser and are never stored here. Ask Claude to share one (file_share, optionally with a group).</p>
+${d.flash ? `<div class="card warn">${esc(d.flash)}</div>` : ''}${confirm}
+${!f || !f.ok ? `<div class="card warn">${esc(f?.error ?? 'Files are unavailable.')}</div>` : groups || '<p class="muted">Nothing is shared right now.</p>'}`;
   },
 };
 
@@ -164,8 +186,15 @@ ${url ? `<br>Sign-in link (bookmark it):<pre class="copy">${esc(url)}</pre>` : '
   },
 };
 
-export const SECTIONS: Section[] = [setup, machines, files, settings];
+export const SECTIONS: Section[] = [files, setup, machines, settings];
 export const sectionFor = (path: string) => SECTIONS.find((s) => s.path === path);
+
+/**
+ * Where /dashboard opens: Setup until a token exists; Machines while no machine is connected and nothing is shared;
+ * otherwise Files. (Offline means the files cannot be listed, so `files` is 0 then.)
+ */
+export const defaultSection = (s: { tokens: number; online: boolean; files: number }): 'setup' | 'machines' | 'files' =>
+  s.tokens === 0 ? 'setup' : !s.online && s.files === 0 ? 'machines' : 'files';
 
 const DASH_CSS = `
 :root{--bg:#fafaf8;--fg:#1d1d1b;--muted:#6b6b66;--line:#e2e1dc;--accent:#c96442;--card:#fff;--ok:#2f8f5b}
@@ -191,6 +220,7 @@ input[type=checkbox]{width:20px;height:20px;vertical-align:middle;margin-right:8
 form.inline{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .pill{display:inline-block;padding:2px 12px;border-radius:99px;border:1px solid var(--line);font-size:14px}.pill.on{color:var(--ok);border-color:var(--ok)}
 .steps{padding-left:20px}a{color:var(--accent)}
+h3{font-size:.95rem;margin:12px 0 0;color:var(--muted);font-weight:600}.grouphead{display:flex;flex-wrap:wrap;align-items:center;gap:8px 8px}.grouphead h2{margin:0;flex:1 1 200px}.group .list{margin:4px 0 8px}.other{margin:24px 0 0}
 @media (max-width:720px){
 .shell{grid-template-columns:minmax(0,1fr)}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 16px 0;flex-direction:row;flex-wrap:wrap;align-items:center}
 .brand{padding:0 0 8px;flex:1}.who{margin:0 0 8px;padding:0}.who .name{display:none}.who form{margin:0}
@@ -208,4 +238,73 @@ export function dashboardPage(d: DashData) {
 <aside class="side"><div class="brand">Session Orchestrator</div><nav aria-label="Dashboard sections">${nav}</nav>
 <div class="who"><span class="name muted">${esc(d.user.name)}</span><form method="post" action="/dashboard/logout"><button>Sign out</button></form></div></aside>
 <main class="content">${cur.render(d)}</main></div></body></html>`;
+}
+
+// ---------- full-screen image viewer: actual size, carousel (arrows, keys, swipe) ----------
+
+export function viewerPage(items: ViewItem[], index: number): string {
+  const n = items.length;
+  const at = (k: number) => items[((k % n) + n) % n]!;
+  const src = (it: ViewItem) => `/f/${enc(it.id)}/${enc(it.name)}?inline=1`;
+  const href = (it: ViewItem) => `/view/${enc(it.id)}/${enc(it.name)}`;
+  const cur = at(index);
+  const json = JSON.stringify(items.map((i) => ({ id: i.id, name: i.name, label: i.label }))).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(cur.name)}</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#000;color:#eee;font:14px/1.4 system-ui,-apple-system,sans-serif}
+body{display:flex;flex-direction:column;overflow:hidden}
+.vis{position:absolute;opacity:0;pointer-events:none}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;padding:4px 12px;background:#111;border-bottom:1px solid #333;z-index:3}
+.bar a,.bar label{color:#fff;text-decoration:none;display:inline-flex;align-items:center;min-height:44px;padding:0 4px;cursor:pointer}
+.grow{flex:1 1 140px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dim{color:#9a9a9a}
+.stage{flex:1;min-height:0;overflow:auto;-webkit-overflow-scrolling:touch}
+.stage img{display:block;width:var(--w,auto);height:auto;max-width:none}
+#fit:checked ~ .stage{display:flex;align-items:center;justify-content:center;overflow:hidden}
+#fit:checked ~ .stage img{width:auto;max-width:100%;max-height:100%;object-fit:contain}
+.nav{position:fixed;top:50%;transform:translateY(-50%);z-index:3;width:48px;height:72px;display:flex;align-items:center;justify-content:center;font-size:36px;color:#fff;background:rgba(0,0,0,.5);text-decoration:none;border-radius:8px}
+.prev{left:8px}.next{right:8px}
+</style></head><body data-i="${index}">
+<input type="checkbox" id="fit" class="vis" aria-label="Fit to screen">
+<div class="bar"><a href="/dashboard/files" id="back">← Files</a><span id="count">${index + 1}/${n}</span>
+<span class="grow" id="cap">${cur.label ? `${esc(cur.label)} · ` : ''}${esc(cur.name)}</span><span class="dim" id="dim"></span>
+<label for="fit">Fit to screen</label><a id="dl" href="/f/${enc(cur.id)}/${enc(cur.name)}">Download</a></div>
+<div class="stage" id="stage"><img id="img" alt="${esc(cur.name)}" src="${src(cur)}"></div>
+${n > 1 ? `<a class="nav prev" id="prev" href="${href(at(index - 1))}" aria-label="Previous">‹</a><a class="nav next" id="next" href="${href(at(index + 1))}" aria-label="Next">›</a>` : ''}
+<script type="application/json" id="items">${json}</script>
+<script>
+(function(){
+var items=JSON.parse(document.getElementById('items').textContent),n=items.length,i=Number(document.body.dataset.i);
+var $=function(x){return document.getElementById(x)},img=$('img'),stage=$('stage');
+var src=function(it){return '/f/'+it.id+'/'+encodeURIComponent(it.name)+'?inline=1'};
+var href=function(it){return '/view/'+it.id+'/'+encodeURIComponent(it.name)};
+var at=function(k){return items[((k%n)+n)%n]};
+// 100% = one image pixel per device pixel: CSS size is the natural size divided by the device pixel ratio.
+function size(){if(img.naturalWidth){img.style.setProperty('--w',(img.naturalWidth/window.devicePixelRatio)+'px');$('dim').textContent=img.naturalWidth+'×'+img.naturalHeight+' px'}}
+img.addEventListener('load',function(){size();stage.scrollTo(0,0)});window.addEventListener('resize',size);if(img.complete)size();
+function show(k){
+  i=((k%n)+n)%n;var it=items[i];img.src=src(it);img.alt=it.name;document.title=it.name;
+  $('count').textContent=(i+1)+'/'+n;$('cap').textContent=(it.label?it.label+' · ':'')+it.name;
+  $('dl').href='/f/'+it.id+'/'+encodeURIComponent(it.name);
+  if($('prev')){$('prev').href=href(at(i-1));$('next').href=href(at(i+1))}
+  history.replaceState(null,'',href(it));var pre=new Image();pre.src=src(at(i+1));
+}
+if(n>1){
+  $('prev').addEventListener('click',function(e){e.preventDefault();show(i-1)});
+  $('next').addEventListener('click',function(e){e.preventDefault();show(i+1)});
+  document.addEventListener('keydown',function(e){
+    if(e.key==='ArrowLeft'){e.preventDefault();show(i-1)}else if(e.key==='ArrowRight'){e.preventDefault();show(i+1)}
+    else if(e.key==='Escape'){location.href='/dashboard/files'}else if(e.key==='f'||e.key==='F'){$('fit').checked=!$('fit').checked}
+  });
+  // Swipe: at actual size the image pans first; a swipe only changes image once the edge of the image was already reached.
+  var t=null;
+  stage.addEventListener('touchstart',function(e){var p=e.changedTouches[0];
+    t={x:p.clientX,y:p.clientY,l:stage.scrollLeft<=1,r:stage.scrollLeft+stage.clientWidth>=stage.scrollWidth-1}},{passive:true});
+  stage.addEventListener('touchend',function(e){if(!t)return;var p=e.changedTouches[0],dx=p.clientX-t.x,dy=p.clientY-t.y,s=t;t=null;
+    if(Math.abs(dx)<50||Math.abs(dx)<Math.abs(dy)*1.5)return;
+    if(dx<0&&s.r)show(i+1);else if(dx>0&&s.l)show(i-1)},{passive:true});
+}
+})();
+</script></body></html>`;
 }

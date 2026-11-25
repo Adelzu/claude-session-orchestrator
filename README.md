@@ -31,7 +31,7 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
 | Tool | What it does |
 | --- | --- |
 | `overview()` | One line per session, plus what is waiting on you. "How are my projects doing?" |
-| `file_share(path, ttl_minutes?)`, `file_list()`, `file_revoke(id)` | Share a file from the hub for download (see File handoff) |
+| `file_share(path, ttl_minutes?, group?, label?)`, `file_list()`, `file_revoke(id or group)` | Share a file from the hub for download (see File handoff) |
 | `events_pending()` | Sessions waiting for your input or approval, oldest first |
 | `machine_list()` / `machine_status(machine)` | Reachability, session count, laptop power (AC or battery); CPU, RAM, disk, GPU/VRAM, link type, LLM endpoints |
 | `session_list(machine?)` | Status: `working`, `waiting_input`, `waiting_approval`, `idle` or `stopped` |
@@ -124,6 +124,8 @@ Sign-in is locked down: a provider (GitHub, Google) is enabled only when both it
 
 - Needs agent mode (`ORCH_CLOUD_URL`) and `FILE_SHARE_ROOTS` in `.env` (comma-separated folders; unset means nothing can be shared).
 - Refused: files outside the roots, dotfiles or anything inside a dot folder (`.env`, `.ssh`, `.git`), folders, and files over `FILE_SHARE_MAX_MB` (default 1024). Symlinks are resolved first.
+- Optional `group` (and `label`, a sub-heading such as a resolution) collect files in the dashboard: one "View all" carousel and one "Delete group" per group. Sharing the same file again updates it.
+- Images, PDF and plain text open in the browser (images full-screen at actual size, with a fit toggle, arrows, arrow keys and swipe); everything else downloads. HTML and SVG are never shown inline.
 - Links expire: default 30 minutes, at most 24 hours (`ttl_minutes`). Revoke any time; a running download is cut.
 - Opening a link without being signed in gives an error, never the file. Phone: sign in once in Chrome (it resumes with `Range`); download managers such as 1DM or ADM need their built-in browser to sign in.
 
