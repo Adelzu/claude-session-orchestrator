@@ -9,6 +9,7 @@ import { Db } from './db.ts';
 import type { Ctx } from './tools/common.ts';
 import * as events from './tools/events.ts';
 import * as files from './tools/files.ts';
+import * as sessionBrain from './tools/session-brain.ts';
 import type { Caller } from './tools/files.ts';
 import * as llm from './tools/llm.ts';
 import * as machines from './tools/machines.ts';
@@ -16,7 +17,8 @@ import * as memory from './tools/memory.ts';
 import * as sessions from './tools/sessions.ts';
 
 /** Same text as the hosted worker's (worker/src/index.ts); a unit test keeps them equal. */
-export const SERVER_INSTRUCTIONS = "Manages the user's Claude Code sessions on their own machines. In voice mode, call events_pending first. Every tool result starts with a one-sentence summary to read out. " + sessions.LONG_WORK_HINT;
+export const BRAIN_RULE = "Keep the shared brain current without being asked: as work happens, append decisions, verified results and status changes (a few lines each) to projects/<project>/notes.md with memory_append, and check memory_search before repeating work.";
+export const SERVER_INSTRUCTIONS = "Manages the user's Claude Code sessions on their own machines. In voice mode, call events_pending first. Every tool result starts with a one-sentence summary to read out. " + BRAIN_RULE + " " + sessions.LONG_WORK_HINT;
 
 export function mcpServer(ctx: Ctx) {
   const server = new McpServer({ name: 'session-orchestrator', version: '1.0.0' }, { instructions: SERVER_INSTRUCTIONS });
@@ -25,10 +27,12 @@ export function mcpServer(ctx: Ctx) {
 }
 
 /** What Claude Code sessions on the hub get: the file tools only, no session control. */
-export const FILES_INSTRUCTIONS = "Share files from this machine to the user's dashboard Files page with file_share (absolute path, optional ttl_minutes, group and label), file_list and file_revoke. Only files inside the folders the hub allows can be shared; dotfiles are refused. The user opens them signed in on the dashboard; nothing is stored in the cloud.";
+export const FILES_INSTRUCTIONS = "Share files from this machine to the user's dashboard Files page with file_share (absolute path, optional ttl_minutes, group and label), file_list and file_revoke. Only files inside the folders the hub allows can be shared; dotfiles are refused. The user opens them signed in on the dashboard; nothing is stored in the cloud. " +
+  "Keep the shared brain current without being asked: as you work, append decisions, verified results and status changes (a few lines each) with memory_append (it adds to this project's notes.md), and use memory_search or memory_read to check what is already known. You can read, search and append only, inside your own project's folder.";
 export function filesServer(ctx: Ctx, caller: Caller | null = null) {
   const server = new McpServer({ name: 'orchestrator-files', version: '1.0.0' }, { instructions: FILES_INSTRUCTIONS });
   files.register(server, ctx, caller);
+  sessionBrain.register(server, ctx, caller);
   return server;
 }
 

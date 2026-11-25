@@ -622,7 +622,7 @@ test('stopped rows come back when Claude Code runs in tmux; an unclear tmux answ
   }
 });
 
-test('/mcp-files: only the three file tools, own token; neither token opens the other endpoint', async () => {
+test('/mcp-files: only the file tools and read/search/append brain tools, own token; neither token opens the other endpoint', async () => {
   const { filesToken } = await import('../src/auth.ts');
   const ft = filesToken('mcp-secret');
   assert.notEqual(ft, 'mcp-secret');
@@ -637,7 +637,7 @@ test('/mcp-files: only the three file tools, own token; neither token opens the 
   const c = new Client({ name: 'session', version: '0' });
   await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp-files`), { requestInit: { headers: { authorization: `Bearer ${ft}` } } }));
   try {
-    assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ['file_list', 'file_revoke', 'file_share']);
+    assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ['file_list', 'file_revoke', 'file_share', 'memory_append', 'memory_read', 'memory_search']);
     const r = await c.callTool({ name: 'file_list', arguments: {} }) as { isError?: boolean; content: { text: string }[] };
     assert.ok(!r.isError);
     assert.ok(Array.isArray(JSON.parse(r.content[0]!.text).files));

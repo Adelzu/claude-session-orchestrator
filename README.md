@@ -133,6 +133,8 @@ Sign-in is locked down: a provider (GitHub, Google) is enabled only when both it
 
 When `MCP_TOKEN` is set, the hub adds a user-scope MCP entry (`orchestrator-files`, written with `claude mcp add-json`) at startup, so every Claude Code session on the hub can call `file_share`, `file_list` and `file_revoke` itself. It points at `/mcp-files`, which serves only those three tools (no session control) with its own token derived from `MCP_TOKEN` (it does not open `/mcp`, and `MCP_TOKEN` does not open it). Shares are still limited to `FILE_SHARE_ROOTS`. New sessions have the tools at once; a session that is already running gets them when it restarts or reloads its MCP servers. Files must be on the hub itself: sessions on other machines would need a hub-side copy.
 
+The same endpoint gives sessions a scoped view of the shared brain: `memory_read`, `memory_search` and `memory_append` only (no write, no delete), limited to `projects/<project>/` of the session's own project (the hub works out which session is calling), with a per-note size cap (2000 characters) and a cap on how large a notes file may grow. Appends go to `notes.md` by default, are attributed to the session and git-committed. The rule "keep the brain current without being asked" is in the server instructions (so Claude app chats see it too) and in the hub's global `~/.claude/CLAUDE.md`.
+
 ## Configuration
 
 - `machines.yaml`: `id`, `ssh_host`, `user`, `os` (`linux` or `macos`), `projects_root`, `local: true` for the hub itself, and an optional `claude_cmd`.

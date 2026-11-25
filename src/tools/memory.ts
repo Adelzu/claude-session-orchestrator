@@ -147,7 +147,7 @@ export async function logSession(ctx: Ctx, pid: string, session: string, text: s
   await commit(dir, `log: ${session}`);
 }
 
-async function search(dir: string, query: string, scope: string) {
+export async function search(dir: string, query: string, scope: string) {
   const base = brainPath(scope, dir);
   const run = async (bin: string, args: string[]) => {
     try { return (await exec(bin, args, { maxBuffer: 4 << 20 })).stdout; }
