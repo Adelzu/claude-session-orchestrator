@@ -13,6 +13,7 @@ import { lastActivity } from '../src/tools/sessions.ts';
 import { adoptedName, adoptPanes, matchProject, projectDirs, type AdoptIo } from '../src/adopt.ts';
 import { Db } from '../src/db.ts';
 import { forwardCall, TOOL_TIMEOUT_MS } from '../src/cloud.ts';
+import { mcpServer, SERVER_INSTRUCTIONS } from '../src/server.ts';
 import { MAX_WAIT_S } from '../src/tools/sessions.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -584,4 +585,23 @@ test('timeouts are staggered: wait cap 300 s < hub tool timeout 330 s; the hub f
     await flush(); mock.timers.tick(71_000); await flush(); mock.timers.tick(1_000);
     assert.equal(await fixed, 'reply');
   } finally { mock.timers.reset(); }
+});
+
+test('long-wait guidance reaches every client: server instructions (hub and worker) and the three tool descriptions', async () => {
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await mcpServer({ db: new Db(':memory:'), cfg: { machines: [], projects: [] } } as never).connect(a);
+  const client = new Client({ name: 'c', version: '1' });
+  await client.connect(b);
+  assert.equal(client.getInstructions(), SERVER_INSTRUCTIONS);
+  for (const t of ['session_send', 'session_wait', 'session_start']) {
+    const d = (await client.listTools()).tools.find((x) => x.name === t)!.description!;
+    assert.match(d, /session_send with wait=0/, t);
+    assert.match(d, /session_wait \(a separate tool/, t);
+    assert.match(d, /Never rely on a single call longer than 180 s/, t);
+    assert.match(d, /about 240 s/, t);
+    assert.match(d, /session_read mode=summary about every 30 s/, t);
+    assert.match(d, /chunks of 180 s or less/, t);
+  }
+  // The hosted worker serves the same instructions.
+  assert.ok(readFileSync(new URL('../worker/src/index.ts', import.meta.url), 'utf8').includes(`instructions: ${JSON.stringify(SERVER_INSTRUCTIONS)}`));
 });

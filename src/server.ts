@@ -12,8 +12,11 @@ import * as machines from './tools/machines.ts';
 import * as memory from './tools/memory.ts';
 import * as sessions from './tools/sessions.ts';
 
+/** Same text as the hosted worker's (worker/src/index.ts); a unit test keeps them equal. */
+export const SERVER_INSTRUCTIONS = "Manages the user's Claude Code sessions on their own machines. In voice mode, call events_pending first. Every tool result starts with a one-sentence summary to read out. " + sessions.LONG_WORK_HINT;
+
 export function mcpServer(ctx: Ctx) {
-  const server = new McpServer({ name: 'session-orchestrator', version: '1.0.0' });
+  const server = new McpServer({ name: 'session-orchestrator', version: '1.0.0' }, { instructions: SERVER_INSTRUCTIONS });
   for (const mod of [machines, sessions, events, memory, llm]) mod.register(server, ctx);
   return server;
 }

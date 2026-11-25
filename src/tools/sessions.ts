@@ -239,8 +239,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DONE: Status[] = ['idle', 'waiting_input', 'waiting_approval', 'stopped'];
 /** Longest a tool call may wait for a turn. Each hop above it waits longer: the hub's tool timeout (cloud.ts), then the worker's. */
 export const MAX_WAIT_S = 300;
+/** Measured: the Claude app drops a call at about 240 s (Cloudflare shows the request "canceled" at 240 s; our hops allow 300+). Generic guidance for any deployment. */
+export const SAFE_WAIT_S = 180;
+export const LONG_WORK_HINT = `Long work: a client cannot run two calls to the same tool at once, so call session_send with wait=0, then wait with session_wait (a separate tool, which leaves session_send free for other sessions). Never rely on a single call longer than ${SAFE_WAIT_S} s: some clients (such as the Claude app) drop calls at about 240 s. Instead poll in short steps (session_read mode=summary about every 30 s) or call session_wait in chunks of ${SAFE_WAIT_S} s or less, and repeat until the turn is done.`;
 const WAIT = (dflt: number) => z.number().int().min(0).max(MAX_WAIT_S).default(dflt)
-  .describe(`Seconds to wait for the session to finish its turn and return its reply (0 = return at once; max ${MAX_WAIT_S})`);
+  .describe(`Seconds to wait for the session to finish its turn and return its reply (0 = return at once; max ${MAX_WAIT_S}, but keep it at ${SAFE_WAIT_S} or less: clients drop calls at about 240 s)`);
 
 /**
  * Wait until the session's turn ends: a hook reports idle/waiting after `since`, or (without hooks)
@@ -317,7 +320,7 @@ export function register(server: McpServer, ctx: Ctx) {
       };
     });
 
-  tool(server, ctx, 'session_start', 'Start a new Claude Code session in tmux for a project, always in the project\'s own folder (Remote Control on by default so it shows in the Claude app). The session is named after the project. Machine defaults to the project\'s machine. For a new project pass create=true: it gets its own folder and git repo (or a clone of repo), is registered, and the folder is pre-trusted in Claude Code so no trust prompt blocks the session.',
+  tool(server, ctx, 'session_start', `Start a new Claude Code session in tmux for a project, always in the project\'s own folder (Remote Control on by default so it shows in the Claude app). The session is named after the project. Machine defaults to the project\'s machine. For a new project pass create=true: it gets its own folder and git repo (or a clone of repo), is registered, and the folder is pre-trusted in Claude Code so no trust prompt blocks the session. If the first prompt will take long, pass wait=0 and use session_wait (see: ${LONG_WORK_HINT}).`,
     {
       project: z.string().describe('Project id or spoken alias; with create=true, the new project\'s name'),
       create: z.boolean().default(false).describe('New project: create its folder and git repo and register it'),
@@ -390,7 +393,7 @@ export function register(server: McpServer, ctx: Ctx) {
       return { summary: `${s.project} on ${s.machine}: ${parts.join('. ')}.`, status: s.status, ...sum };
     });
 
-  tool(server, ctx, 'session_send', 'Send a message to a session (typed, then Enter) and, by default, wait for its reply.',
+  tool(server, ctx, 'session_send', `Send a message to a session (typed, then Enter) and, by default, wait for its reply. ${LONG_WORK_HINT}`,
     { session: z.string(), message: z.string().min(1), wait: WAIT(45) },
     async ({ session, message, wait }) => {
       const s = await resolve(ctx, session);
@@ -400,7 +403,7 @@ export function register(server: McpServer, ctx: Ctx) {
       return (await sendAndWait(ctx, s, wait, sent)) ?? { summary: `Sent to ${s.project}.` };
     });
 
-  tool(server, ctx, 'session_wait', 'Wait for a working session to finish its turn (or ask for something), then return its reply.',
+  tool(server, ctx, 'session_wait', `Wait for a working session to finish its turn (or ask for something), then return its reply. Use it after session_send wait=0 for long work. ${LONG_WORK_HINT}`,
     { session: z.string(), seconds: WAIT(60) },
     async ({ session, seconds }) => {
       const s = await resolve(ctx, session);
