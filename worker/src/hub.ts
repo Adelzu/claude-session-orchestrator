@@ -7,7 +7,8 @@ import type { Env } from './index.ts';
 export interface ToolInfo { name: string; title?: string; description?: string; inputSchema: unknown; annotations?: unknown }
 type Result = { content: unknown[]; isError?: boolean; [k: string]: unknown };
 
-const CALL_TIMEOUT_MS = 120_000;
+// Above the hub's 330 s tool timeout (src/cloud.ts) and the 300 s wait cap, so this clean error only shows when the agent is stuck.
+export const CALL_TIMEOUT_MS = 360_000;
 const MAX_TOOLS = 200;
 
 export class UserHub extends DurableObject<Env> {
@@ -61,7 +62,7 @@ export class UserHub extends DurableObject<Env> {
     return new Promise<Result>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        resolve({ content: [{ type: 'text', text: JSON.stringify({ summary: 'Your orchestrator agent did not answer within 2 minutes.' }) }], isError: true });
+        resolve({ content: [{ type: 'text', text: JSON.stringify({ summary: 'Your orchestrator agent did not answer within 6 minutes.' }) }], isError: true });
       }, CALL_TIMEOUT_MS);
       this.pending.set(id, { resolve, timer });
       ws.send(JSON.stringify({ type: 'call', id, name, args }));

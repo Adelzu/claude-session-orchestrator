@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +12,11 @@ import { findProject, loadConfig, type Config, type Machine } from '../src/confi
 import { lastActivity } from '../src/tools/sessions.ts';
 import { adoptedName, adoptPanes, matchProject, projectDirs, type AdoptIo } from '../src/adopt.ts';
 import { Db } from '../src/db.ts';
+import { forwardCall, TOOL_TIMEOUT_MS } from '../src/cloud.ts';
+import { MAX_WAIT_S } from '../src/tools/sessions.ts';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { DatabaseSync } from 'node:sqlite';
 import { checkAnswer, isClaudeArgs, newSessionCmd, parseDiscovery, RCVAL_SH, resolveRemoteControl } from '../src/tmux.ts';
 
@@ -547,4 +552,36 @@ test('Db.setStatus logs every change with its source, and nothing when the statu
     'status: cc-a-0001 idle -> stopped (hook SessionEnd (clear))',
     'status: cc-a-0001 stopped -> idle (refresh: claude running in its tmux session)',
   ]);
+});
+
+test('timeouts are staggered: wait cap 300 s < hub tool timeout 330 s; the hub forwards past the SDK default of 60 s', async () => {
+  assert.equal(MAX_WAIT_S, 300);
+  assert.ok(TOOL_TIMEOUT_MS > MAX_WAIT_S * 1000, 'the hub never cuts a tool off before its own wait cap');
+  const workerSrc = readFileSync(new URL('../worker/src/hub.ts', import.meta.url), 'utf8');
+  const workerMs = Number(workerSrc.match(/CALL_TIMEOUT_MS = ([\d_]+)/)![1].replace(/_/g, ''));
+  assert.ok(workerMs > TOOL_TIMEOUT_MS, 'the worker waits longer than the hub');
+
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const server = new McpServer({ name: 't', version: '1' });
+    server.registerTool('slow', { inputSchema: {} }, async () => {
+      await new Promise((r) => setTimeout(r, 70_000)); // a turn that takes 70 s
+      return { content: [{ type: 'text' as const, text: 'reply' }] };
+    });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    const client = new Client({ name: 'c', version: '1' });
+    await client.connect(b);
+    const flush = () => new Promise((r) => setImmediate(r));
+
+    // The bug: no explicit timeout means the SDK gives up at 60 s with -32001.
+    const old = client.callTool({ name: 'slow', arguments: {} }).then(() => 'ok', (e: Error) => e.message);
+    await flush(); mock.timers.tick(61_000);
+    assert.match(await old, /-32001.*timed out/);
+
+    // The fix: forwardCall waits for the tool.
+    const fixed = forwardCall(client, 'slow', {}).then((r) => (r.content as { text: string }[])[0].text, (e: Error) => e.message);
+    await flush(); mock.timers.tick(71_000); await flush(); mock.timers.tick(1_000);
+    assert.equal(await fixed, 'reply');
+  } finally { mock.timers.reset(); }
 });

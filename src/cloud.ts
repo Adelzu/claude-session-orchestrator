@@ -4,6 +4,16 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
+/**
+ * How long the hub waits for a forwarded tool call. The SDK default is 60 s, which cut session_send short
+ * with "MCP error -32001: Request timed out". Staggered above the 300 s wait cap (MAX_WAIT_S) and below the
+ * worker's 360 s, so the tool's own wait is always the real limit. No resetTimeoutOnProgress: tools send no progress.
+ */
+export const TOOL_TIMEOUT_MS = 330_000;
+
+export const forwardCall = (client: Client, name: string, args: Record<string, unknown>) =>
+  client.callTool({ name, arguments: args }, undefined, { timeout: TOOL_TIMEOUT_MS });
+
 export async function connectCloud(makeServer: () => McpServer, url: string, token: string) {
   const u = new URL(url);
   // The token must never travel in clear text: plain ws:// only for a local test server.
@@ -39,7 +49,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
       if (msg.type !== 'call' || typeof msg.id !== 'string' || typeof msg.name !== 'string') return;
       let result;
       try {
-        result = await client.callTool({ name: msg.name, arguments: msg.args ?? {} });
+        result = await forwardCall(client, msg.name, msg.args ?? {});
       } catch (e) {
         result = { content: [{ type: 'text', text: JSON.stringify({ summary: `Tool failed: ${(e as Error).message}` }) }], isError: true };
       }

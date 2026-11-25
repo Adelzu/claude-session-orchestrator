@@ -237,8 +237,10 @@ export async function writeLog(ctx: Ctx, s: SessionRow, m: Machine, note?: strin
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DONE: Status[] = ['idle', 'waiting_input', 'waiting_approval', 'stopped'];
-const WAIT = (dflt: number) => z.number().int().min(0).max(100).default(dflt)
-  .describe('Seconds to wait for the session to finish its turn and return its reply (0 = return at once; max 100)');
+/** Longest a tool call may wait for a turn. Each hop above it waits longer: the hub's tool timeout (cloud.ts), then the worker's. */
+export const MAX_WAIT_S = 300;
+const WAIT = (dflt: number) => z.number().int().min(0).max(MAX_WAIT_S).default(dflt)
+  .describe(`Seconds to wait for the session to finish its turn and return its reply (0 = return at once; max ${MAX_WAIT_S})`);
 
 /**
  * Wait until the session's turn ends: a hook reports idle/waiting after `since`, or (without hooks)
