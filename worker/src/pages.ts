@@ -58,7 +58,7 @@ ${d.redirectIsLoopback ? '<p class="card warn"><strong>This sends access to an a
 <p>It will be able to start, read, message, approve and stop Claude Code sessions through <strong>your own agent</strong>, and use its notes and local models.</p>
 </div>
 <form method="post"><input type="hidden" name="handle" value="${esc(handle)}">
-${buttons || '<p>No sign-in provider is configured.</p>'}
+${buttons || '<p>Sign-in is not configured.</p>'}
 <button name="provider" value="deny">Deny</button></form>`);
 }
 
@@ -69,7 +69,7 @@ interface Status { online: boolean; since: number | null; tools: number }
 export function dashboardPage(origin: string, s: Session | null, tokens: TokenRow[], st: Status | null, newToken: string | null, providers: Provider[]) {
   if (!s) {
     return layout('Dashboard · Session Orchestrator', `<h1>Dashboard</h1><p>Sign in to manage your agent tokens.</p>
-${providers.map((p) => `<a class="btn" href="/login?provider=${p}">Sign in with ${NAMES[p]}</a>`).join('') || '<p>No sign-in provider is configured.</p>'}`);
+${providers.map((p) => `<a class="btn" href="/login?provider=${p}">Sign in with ${NAMES[p]}</a>`).join('') || '<p>Sign-in is not configured.</p>'}`);
   }
   const ws = origin.replace(/^http/, 'ws');
   const rows = tokens.map((t) => `<tr><td>${esc(t.label)}</td><td class="muted">${new Date(t.created).toISOString().slice(0, 10)}</td>

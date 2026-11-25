@@ -20,7 +20,7 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
   COOKIE_SECRET: string;
   GITHUB_CLIENT_ID?: string; GITHUB_CLIENT_SECRET?: string; ALLOWED_GITHUB_IDS?: string;
-  GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string;
+  GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; ALLOWED_GOOGLE_EMAILS?: string;
   DEV_LOGIN?: string;
 }
 interface Props { userId: string; name: string }
@@ -169,6 +169,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (state.startsWith('dash.')) {
       const login = await unseal<{ state: string; verifier: string; provider: Provider }>(env, cookie(request, LOGIN));
       if (!login || login.state !== state || url.searchParams.get('error')) return html(messagePage('Sign-in failed or expired. Please try again.'), 400);
+      if (!providers(request, env).includes(login.provider)) return html(messagePage('Not found.'), 404);
       const who = await exchange(login.provider, request, env, url.searchParams.get('code') ?? '', login.verifier);
       const headers = new Headers({ location: '/dashboard' });
       headers.append('set-cookie', setCookie(SESSION, await seal(env, who, 7 * 86400), 7 * 86400));
@@ -177,6 +178,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
     // MCP client authorization.
     const resumed = await oauth.finishUpstream<{ verifier: string; provider: Provider }>(request);
+    if (!providers(request, env).includes(resumed.data.provider)) return html(messagePage('Not found.'), 404);
     if (url.searchParams.get('error')) {
       resumed.headers.set('location', authorizationErrorRedirect(resumed.request, 'access_denied'));
       return new Response(null, { status: 302, headers: resumed.headers });

@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "wrangler dev --port 8788",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "test": "node --test test/identity.test.ts"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.2.4",

@@ -85,6 +85,13 @@ const text = (r) => JSON.parse(r.content[0].text);
 assert.equal((await fetch(`${BASE}/agent`, { headers: { authorization: 'Bearer cso_nope' } })).status, 401);
 
 // 2. Alice: dashboard token, agent online, MCP sees her 24 annotated tools.
+// GitHub and Google are off here (no client id/secret in .dev.vars): no buttons, and their routes refuse.
+{
+  const go = browser();
+  assert.doesNotMatch(await (await go('/dashboard')).text(), /GitHub|Google/);
+  for (const p of ['github', 'google']) assert.equal((await go(`/login?provider=${p}`)).status, 400);
+  assert.equal((await go('/callback?state=dash.x&code=x')).status, 400); // no login cookie: refused before any exchange
+}
 const alice = await dashboardToken('alice', 'e2e laptop');
 const agent = startAgent(alice.token);
 for (let i = 0; i < 40 && !agent.log().includes('cloud: connected'); i++) await wait(250);
