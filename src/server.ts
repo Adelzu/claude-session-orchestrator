@@ -2,13 +2,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { accessJwtOk, filesTokenOk, machineTokenOk, tokenOk } from './auth.ts';
-import { ensureSessionMcp } from './session-mcp.ts';
+import { callerFor, ensureSessionMcp } from './session-mcp.ts';
 import { connectCloud } from './cloud.ts';
 import { loadConfig } from './config.ts';
 import { Db } from './db.ts';
 import type { Ctx } from './tools/common.ts';
 import * as events from './tools/events.ts';
 import * as files from './tools/files.ts';
+import type { Caller } from './tools/files.ts';
 import * as llm from './tools/llm.ts';
 import * as machines from './tools/machines.ts';
 import * as memory from './tools/memory.ts';
@@ -25,9 +26,9 @@ export function mcpServer(ctx: Ctx) {
 
 /** What Claude Code sessions on the hub get: the file tools only, no session control. */
 export const FILES_INSTRUCTIONS = "Share files from this machine to the user's dashboard Files page with file_share (absolute path, optional ttl_minutes, group and label), file_list and file_revoke. Only files inside the folders the hub allows can be shared; dotfiles are refused. The user opens them signed in on the dashboard; nothing is stored in the cloud.";
-export function filesServer(ctx: Ctx) {
+export function filesServer(ctx: Ctx, caller: Caller | null = null) {
   const server = new McpServer({ name: 'orchestrator-files', version: '1.0.0' }, { instructions: FILES_INSTRUCTIONS });
-  files.register(server, ctx);
+  files.register(server, ctx, caller);
   return server;
 }
 
@@ -61,7 +62,7 @@ export function app(ctx: Ctx, eventsToken = process.env.EVENTS_TOKEN, mcpToken =
         const ok = url.pathname === '/mcp' ? tokenOk(req, mcpToken) || (await accessJwtOk(req)) : filesTokenOk(req, mcpToken);
         if (!ok) return void res.writeHead(401).end();
         // Stateless: a fresh server + transport per request; all state lives in SQLite.
-        const server = url.pathname === '/mcp' ? mcpServer(ctx) : filesServer(ctx);
+        const server = url.pathname === '/mcp' ? mcpServer(ctx) : filesServer(ctx, await callerFor(ctx, [req.headers['x-orch-pane']].flat()[0]));
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
         res.on('close', () => { transport.close(); server.close(); });
         await server.connect(transport);

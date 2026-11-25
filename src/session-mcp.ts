@@ -8,11 +8,19 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { filesToken } from './auth.ts';
 import type { Config } from './config.ts';
+import { run as runOn, q } from './transport/ssh.ts';
+import { PANE_RE } from './tmux.ts';
+import type { Caller } from './tools/files.ts';
+import type { Ctx } from './tools/common.ts';
 
 export const SESSION_MCP_NAME = 'orchestrator-files';
 
+/**
+ * `X-Orch-Pane` is expanded by Claude Code from the session's own environment ($TMUX_PANE, "none" outside tmux); the hub
+ * maps it to the session name, so the dashboard can say who shared a file. It only labels; it grants nothing.
+ */
 const entry = (port: number | string, mcpToken: string) =>
-  ({ type: 'http', url: `http://127.0.0.1:${port}/mcp-files`, headers: { Authorization: `Bearer ${filesToken(mcpToken)}` } });
+  ({ type: 'http', url: `http://127.0.0.1:${port}/mcp-files`, headers: { Authorization: `Bearer ${filesToken(mcpToken)}`, 'X-Orch-Pane': '${TMUX_PANE:-none}' } });
 
 /** The user-scope entry Claude Code has now (read only), if any. */
 function current(configDir: string): { url?: string; headers?: Record<string, string> } | undefined {
@@ -39,7 +47,7 @@ export async function ensureSessionMcp(cfg: Config, o: { mcpToken: string; port:
   const want = entry(o.port, o.mcpToken);
   const log: string[] = [];
   const have = current(configDir);
-  if (have?.url === want.url && have.headers?.Authorization === want.headers.Authorization) return ['session file tools: already configured'];
+  if (have?.url === want.url && JSON.stringify(have.headers) === JSON.stringify(want.headers)) return ['session file tools: already configured'];
   for (const cmd of new Set(cfg.machines.filter((m) => m.local).map((m) => m.claude_cmd))) {
     if (have) await run(cmd, ['mcp', 'remove', SESSION_MCP_NAME, '--scope', 'user']); // stale (token rotated or port changed)
     // The JSON goes in on stdin, so the token never appears in the process list.
@@ -48,4 +56,26 @@ export async function ensureSessionMcp(cfg: Config, o: { mcpToken: string; port:
   }
   for (const l of log) console.log(l);
   return log;
+}
+
+const seen = new Map<string, { at: number; caller: Caller | null }>();
+
+/** Which session is behind this tmux pane id (header X-Orch-Pane)? Adopted rows by pane, else the tmux session's name. */
+export async function callerFor(ctx: Ctx, pane: string | undefined, now = Date.now()): Promise<Caller | null> {
+  if (!pane || !PANE_RE.test(pane)) return null;
+  const hit = seen.get(pane);
+  if (hit && now - hit.at < 60_000) return hit.caller;
+  const m = ctx.cfg.machines.find((x) => x.local);
+  let caller: Caller | null = null;
+  if (m) {
+    let name: string | null = ctx.db.adoptedRow(m.id, pane)?.name ?? null;
+    if (!name) {
+      const r = await runOn(m, `tmux display-message -p -t ${q(pane)} '#{session_name}'`, 3000);
+      const n = r.stdout.trim();
+      if (r.code === 0 && /^[\w.-]{1,40}$/.test(n)) name = n;
+    }
+    if (name) caller = { session: name, machine: m.id };
+  }
+  seen.set(pane, { at: now, caller });
+  return caller;
 }

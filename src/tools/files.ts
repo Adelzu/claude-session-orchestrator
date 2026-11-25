@@ -84,7 +84,9 @@ export function checkPath(path: string, lim: Limits): { real: string; size: numb
   return { real, size: st.size, mtimeMs: st.mtimeMs };
 }
 
-interface ShareRow { id: string; path: string; name: string; size: number; created: number; expires: number; revoked: number; grp: string | null; label: string | null }
+/** Who shared a file: the Claude Code session (and its machine) behind a /mcp-files call; null for the main /mcp endpoint. */
+export interface Caller { session: string; machine: string }
+interface ShareRow { id: string; path: string; name: string; size: number; created: number; expires: number; revoked: number; grp: string | null; label: string | null; by_session: string | null; by_machine: string | null }
 
 const live = (ctx: Ctx, now = Date.now()) =>
   ctx.db.db.prepare(`SELECT * FROM shares WHERE revoked = 0 AND expires > ? ORDER BY created DESC`).all(now) as unknown as ShareRow[];
@@ -106,7 +108,7 @@ export function cleanTag(v: string | undefined | null, what: string, max: number
   return t;
 }
 
-export function share(ctx: Ctx, path: string, ttlMin = DEFAULT_TTL_MIN, now = Date.now(), lim = limits(), base = baseUrl(), meta: { group?: string; label?: string } = {}) {
+export function share(ctx: Ctx, path: string, ttlMin = DEFAULT_TTL_MIN, now = Date.now(), lim = limits(), base = baseUrl(), meta: { group?: string; label?: string; by?: Caller | null } = {}) {
   if (!base) throw new UserError('File sharing needs agent mode (ORCH_CLOUD_URL) so the dashboard can serve the file.');
   if (!Number.isInteger(ttlMin) || ttlMin < 1 || ttlMin > MAX_TTL_MIN) throw new UserError(`ttl_minutes must be 1 to ${MAX_TTL_MIN} (24 h).`);
   const grp = cleanTag(meta.group, 'group', 60);
@@ -117,20 +119,22 @@ export function share(ctx: Ctx, path: string, ttlMin = DEFAULT_TTL_MIN, now = Da
   const same = ctx.db.db.prepare(`SELECT * FROM shares WHERE path = ? AND revoked = 0 AND expires > ? LIMIT 1`).get(real, now) as ShareRow | undefined;
   if (same) {
     const expires = now + ttlMin * 60_000;
-    ctx.db.db.prepare(`UPDATE shares SET grp = ?, label = ?, expires = ?, size = ? WHERE id = ?`).run(grp, label, expires, size, same.id);
-    const row = { ...same, grp, label, expires, size };
+    const by = meta.by ?? null;
+    ctx.db.db.prepare(`UPDATE shares SET grp = ?, label = ?, expires = ?, size = ?, created = ?, by_session = ?, by_machine = ? WHERE id = ?`)
+      .run(grp, label, expires, size, now, by?.session ?? null, by?.machine ?? null, same.id);
+    const row = { ...same, grp, label, expires, size, created: now, by_session: by?.session ?? null, by_machine: by?.machine ?? null };
     changed();
     return { ...row, url: urlOf(base, row) };
   }
-  const row: ShareRow = { id: randomBytes(16).toString('base64url'), path: real, name: safeName(real), size, created: now, expires: now + ttlMin * 60_000, revoked: 0, grp, label };
-  ctx.db.db.prepare(`INSERT INTO shares (id, path, name, size, created, expires, revoked, grp, label) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`)
-    .run(row.id, row.path, row.name, row.size, row.created, row.expires, row.grp, row.label);
+  const row: ShareRow = { id: randomBytes(16).toString('base64url'), path: real, name: safeName(real), size, created: now, expires: now + ttlMin * 60_000, revoked: 0, grp, label, by_session: meta.by?.session ?? null, by_machine: meta.by?.machine ?? null };
+  ctx.db.db.prepare(`INSERT INTO shares (id, path, name, size, created, expires, revoked, grp, label, by_session, by_machine) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`)
+    .run(row.id, row.path, row.name, row.size, row.created, row.expires, row.grp, row.label, row.by_session, row.by_machine);
   changed();
   return { ...row, url: urlOf(base, row) };
 }
 
 export function list(ctx: Ctx, now = Date.now(), base = baseUrl()) {
-  return live(ctx, now).map((s) => ({ id: s.id, name: s.name, size: s.size, expires: s.expires, group: s.grp, label: s.label, url: base ? urlOf(base, s) : null }));
+  return live(ctx, now).map((s) => ({ id: s.id, name: s.name, size: s.size, expires: s.expires, group: s.grp, label: s.label, created: s.created, session: s.by_session, machine: s.by_machine, url: base ? urlOf(base, s) : null }));
 }
 
 const active = new Map<string, Set<AbortController>>();
@@ -267,7 +271,7 @@ export class FileTransfers {
 
 const humanSize = (n: number) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
 
-export function register(server: McpServer, ctx: Ctx) {
+export function register(server: McpServer, ctx: Ctx, caller: Caller | null = null) {
   tool(server, ctx, 'file_share',
     'Share one file from the hub for viewing or download. Returns a link that works only for the signed-in owner (dashboard sign-in); nothing is stored in the cloud. Allowed folders only, no dotfiles, size cap. Default 30 minutes, max 24 h. Optional group (and label) collect files in the dashboard; sharing the same file again updates it.',
     {
@@ -277,7 +281,7 @@ export function register(server: McpServer, ctx: Ctx) {
       label: z.string().max(40).optional().describe('Sub-label inside the group, e.g. 1920x1080 (needs a group)'),
     },
     async ({ path, ttl_minutes, group, label }) => {
-      const s = share(ctx, path, ttl_minutes, undefined, undefined, undefined, { group, label });
+      const s = share(ctx, path, ttl_minutes, undefined, undefined, undefined, { group, label, by: caller });
       return { summary: `Shared ${s.name} (${humanSize(s.size)}) for ${ttl_minutes} minutes${s.grp ? ` in group ${s.grp}` : ''}. Open it signed in: ${s.url}`, id: s.id, name: s.name, size: s.size, group: s.grp, label: s.label, expires: new Date(s.expires).toISOString(), url: s.url };
     });
 

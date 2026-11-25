@@ -28,7 +28,7 @@ export const viewKind = (name: string): ViewKind =>
 /** Types that may be served inline. Anything else is forced to a download here, whatever the agent said. */
 export const SAFE_INLINE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif', 'application/pdf', 'text/plain; charset=utf-8']);
 
-export interface FileRow { id: string; name: string; size: number; expires: number; group: string | null; label: string | null }
+export interface FileRow { id: string; name: string; size: number; expires: number; group: string | null; label: string | null; created: number; session: string | null; machine: string | null }
 export interface ViewItem { id: string; name: string; label: string | null }
 const byLabelName = (a: FileRow, b: FileRow) => (a.label ?? '').localeCompare(b.label ?? '') || a.name.localeCompare(b.name);
 
@@ -142,6 +142,13 @@ export class Download {
 
 export const humanSize = (n: number) =>
   n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(n / 1024))} KB`;
+
+/** "cc-filetest on hub"; files shared through the main endpoint (the Claude app, scripts) say "orchestrator". */
+export const sharedBy = (f: Pick<FileRow, 'session' | 'machine'>) => (f.session ? `${f.session}${f.machine ? ` on ${f.machine}` : ''}` : 'orchestrator');
+export const sinceText = (ts: number, now = Date.now()) => {
+  const m = Math.floor((now - ts) / 60_000);
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.floor(m / 60)} h ago` : `${Math.floor(m / 1440)} d ago`;
+};
 
 export const expiresIn = (expires: number, now = Date.now()) => {
   const m = Math.round((expires - now) / 60_000);

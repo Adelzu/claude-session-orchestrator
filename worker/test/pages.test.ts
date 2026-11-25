@@ -50,7 +50,7 @@ test('machines: token create/revoke forms, new token shown once with the start c
 });
 
 test('files: rows with download and revoke, names escaped, errors shown', () => {
-  const items = [{ id: 'abcdefghijklmnopqrstuv', name: '<img src=x>.pdf', size: 4 * 1024 * 1024, expires: Date.now() + 28 * 60_000, group: null, label: null }];
+  const items = [{ id: 'abcdefghijklmnopqrstuv', name: '<img src=x>.pdf', size: 4 * 1024 * 1024, expires: Date.now() + 28 * 60_000, group: null, label: null, created: Date.now(), session: null, machine: null }];
   const h = dashboardPage(base({ active: 'files', files: { ok: true, items } }));
   assert.match(h, /href="\/f\/abcdefghijklmnopqrstuv\/%3Cimg%20src%3Dx%3E\.pdf"/);
   assert.match(h, /href="\/dashboard\/files\?revoke=abcdefghijklmnopqrstuv"/); // revoke goes through a confirm step
@@ -83,7 +83,7 @@ test('hidden mode: public pages carry no site links and no sign-in outside the s
   assert.match(messagePage('x'), /<footer/);
 });
 
-const F = (id: string, name: string, group: string | null, label: string | null) => ({ id: id.padEnd(22, 'x'), name, size: 1000, expires: Date.now() + 3_600_000, group, label });
+const F = (id: string, name: string, group: string | null, label: string | null, session: string | null = null, created = Date.now() - 12 * 60_000) => ({ id: id.padEnd(22, 'x'), name, size: 1000, expires: Date.now() + 3_600_000, group, label, created, session, machine: session ? 'hub' : null });
 
 test('files: groups with sub-labels, View all, Delete group (confirm link), single files with View/Open/Download', () => {
   const items = [
@@ -154,4 +154,35 @@ test('files page: live updates over Server-Sent Events, refetching the same page
   assert.match(h, /fetch\(location\.href/);                 // keeps ?revoke=... confirm state
   assert.match(h, /querySelector\('main\.content'\)/);       // a sign-in page (expired session) is ignored
   assert.ok(h.indexOf('</main>') < h.indexOf('EventSource')); // the script lives outside the swapped area
+});
+
+test('files: groups are collapsible (details, open by default) and say who shared them and when', () => {
+  const items = [
+    F('a1', 'S00.png', 'watermark-lighter', '1920x1080', 'cc-filetest', Date.UTC(2026, 10, 25, 14, 41)),
+    F('a2', 'S02.png', 'watermark-lighter', '1920x1080', 'cc-filetest', Date.UTC(2026, 10, 25, 14, 46)),
+    F('b1', 'S00.png', 'watermark-lighter', '2560x1440', 'cc-other', Date.UTC(2026, 10, 25, 14, 50)),
+    F('s1', 'doc.pdf', null, null, null, Date.UTC(2026, 10, 25, 9, 0)),
+    F('s2', 'n.txt', null, null, 'cc-solo', Date.UTC(2026, 10, 25, 10, 0)),
+  ];
+  const h = dashboardPage(base({ active: 'files', files: { ok: true, items } }));
+  assert.match(h, /<details class="card group" data-g="watermark-lighter" open><summary class="grouphead">/);
+  assert.match(h, /<\/ul><\/details>/);
+  // group header: sessions (deduplicated), earliest time, relative time
+  assert.match(h, /shared by cc-filetest on hub, cc-other on hub · 2026-11-25 14:41 UTC \(/);
+  // ungrouped files carry their own label and time
+  assert.match(h, /shared by orchestrator · 2026-11-25 09:00 UTC/);
+  assert.match(h, /shared by cc-solo on hub · 2026-11-25 10:00 UTC/);
+  // grouped rows do not repeat it
+  const groupBody = h.slice(h.indexOf('<details'), h.indexOf('</details>'));
+  assert.doesNotMatch(groupBody.split('</summary>')[1]!, /shared by/);
+  // buttons stay in the always-visible summary
+  assert.match(groupBody.split('</summary>')[0]!, /View all/);
+  assert.match(groupBody.split('</summary>')[0]!, /Delete group/);
+});
+
+test('files page: live refresh keeps which groups are collapsed', () => {
+  const h = dashboardPage(base({ active: 'files', files: { ok: true, items: [] } }));
+  assert.match(h, /details\[data-g\]/);
+  assert.match(h, /open\[x\.dataset\.g\]=x\.open/);
+  assert.match(h, /x\.open=open\[x\.dataset\.g\]/);
 });

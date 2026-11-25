@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Download, EventFeed, SAFE_INLINE, carouselOf, decodeFrame, expiresIn, groupFiles, humanSize, parseFilePath, parseViewPath, responseHeaders, viewKind } from '../src/files.ts';
+import { Download, EventFeed, SAFE_INLINE, carouselOf, decodeFrame, expiresIn, groupFiles, sharedBy, sinceText, humanSize, parseFilePath, parseViewPath, responseHeaders, viewKind } from '../src/files.ts';
 
 const ID = '11111111-2222-3333-4444-555555555555';
 const frame = (id: string, data: number[]) => { const b = new Uint8Array(36 + data.length); b.set(new TextEncoder().encode(id)); b.set(data, 36); return b.buffer; };
@@ -146,7 +146,7 @@ test('responseHeaders: inline only for safe types, otherwise forced to a downloa
   assert.ok(![...SAFE_INLINE].some((t) => /html|svg|xml|javascript/.test(t)));
 });
 
-const R = (id: string, name: string, group: string | null, label: string | null) => ({ id, name, size: 1, expires: 1, group, label });
+const R = (id: string, name: string, group: string | null, label: string | null) => ({ id, name, size: 1, expires: 1, group, label, created: 1, session: null, machine: null });
 
 test('groupFiles: groups A-Z, ungrouped last, labels A-Z, files A-Z', () => {
   const g = groupFiles([R('4', 'z.txt', null, null), R('3', 'b.png', 'beta', '2560x1440'), R('2', 'a.png', 'alpha', '1920x1080'), R('1', 'S02.png', 'alpha', '1920x1080'), R('5', 'S00.png', 'alpha', '2560x1440')]);
@@ -196,4 +196,15 @@ test('EventFeed: a cap drops the oldest page, not the newest', async () => {
   await readText(r2); await readText(r3);
   feed.broadcast();
   assert.match(await readText(r3), /event: files/);
+});
+
+test('sharedBy and sinceText', () => {
+  assert.equal(sharedBy({ session: 'cc-filetest', machine: 'hub' }), 'cc-filetest on hub');
+  assert.equal(sharedBy({ session: 'cc-x', machine: null }), 'cc-x');
+  assert.equal(sharedBy({ session: null, machine: null }), 'orchestrator');
+  const now = 10_000_000_000;
+  assert.equal(sinceText(now - 20_000, now), 'just now');
+  assert.equal(sinceText(now - 12 * 60_000, now), '12 min ago');
+  assert.equal(sinceText(now - 3 * 3_600_000, now), '3 h ago');
+  assert.equal(sinceText(now - 2 * 86_400_000, now), '2 d ago');
 });

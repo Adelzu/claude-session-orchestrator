@@ -323,3 +323,17 @@ test('files-changed notifier: once per burst, on share, update and revoke; silen
     assert.equal(n, 4);
   } finally { setFilesListener(null); }
 });
+
+test('who shared it and when: stored from the caller, listed, refreshed on re-share', () => {
+  const { root, lim, ctx } = setup();
+  const t0 = 9_000_000;
+  const a = share(ctx, join(root, 'a.txt'), 30, t0, lim, BASE, { by: { session: 'cc-filetest', machine: 'hub' } });
+  share(ctx, join(root, 'sub', 'b.bin'), 30, t0 + 5, lim, BASE); // via the main endpoint: no caller
+  const l = list(ctx, t0 + 10, BASE);
+  assert.deepEqual(l.find((f) => f.id === a.id) && [l.find((f) => f.id === a.id)!.session, l.find((f) => f.id === a.id)!.machine, l.find((f) => f.id === a.id)!.created], ['cc-filetest', 'hub', t0]);
+  const b = l.find((f) => f.name === 'b.bin')!;
+  assert.deepEqual([b.session, b.machine, b.created], [null, null, t0 + 5]);
+  share(ctx, join(root, 'a.txt'), 30, t0 + 1000, lim, BASE, { by: { session: 'cc-other', machine: 'hub' } });
+  const again = list(ctx, t0 + 1000, BASE).find((f) => f.id === a.id)!;
+  assert.deepEqual([again.session, again.created], ['cc-other', t0 + 1000]);
+});

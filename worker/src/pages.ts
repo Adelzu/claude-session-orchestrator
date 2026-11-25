@@ -1,6 +1,6 @@
 import type { ConsentDescription } from '@cloudflare/workers-oauth-provider';
 import type { Provider } from './identity.ts';
-import { expiresIn, groupFiles, humanSize, viewKind, type FileRow, type ViewItem } from './files.ts';
+import { expiresIn, groupFiles, humanSize, sharedBy, sinceText, viewKind, type FileRow, type ViewItem } from './files.ts';
 import type { Resolved } from './settings.ts';
 
 const esc = (v: string) => v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -131,11 +131,12 @@ ${rows ? `<ul class="list">${rows}</ul>` : '<p class="muted">No tokens yet.</p>'
 };
 
 const enc = encodeURIComponent;
-const fileRow = (x: FileRow) => {
+const sharedText = (created: number, by: string) => `shared by ${esc(by)} · ${esc(when(created))} (${sinceText(created)})`;
+const fileRow = (x: FileRow, showBy: boolean) => {
   const kind = viewKind(x.name);
   const open = kind === 'image' ? `<a class="btn" href="/view/${enc(x.id)}/${enc(x.name)}">View</a>`
     : kind ? `<a class="btn" href="/f/${enc(x.id)}/${enc(x.name)}?inline=1" target="_blank" rel="noopener">Open</a>` : '';
-  return `<li class="row"><span class="grow"><strong>${esc(x.name)}</strong><br><span class="muted">${humanSize(x.size)} · expires in ${esc(expiresIn(x.expires))}</span></span>
+  return `<li class="row"><span class="grow"><strong>${esc(x.name)}</strong><br><span class="muted">${humanSize(x.size)} · expires in ${esc(expiresIn(x.expires))}</span>${showBy ? `<br><span class="muted">${sharedText(x.created, sharedBy(x))}</span>` : ''}</span>
 ${open}<a class="btn" href="/f/${enc(x.id)}/${enc(x.name)}">Download</a>
 <a class="btn" href="/dashboard/files?revoke=${enc(x.id)}">Revoke</a></li>`;
 };
@@ -149,13 +150,16 @@ const files: Section = {
 <p>${c.group ? `This stops sharing all ${c.count} file${c.count === 1 ? '' : 's'} in it now` : 'This stops sharing it now'} and cuts running downloads. The files on your machine are kept.</p>
 <form method="post" action="/dashboard/files/revoke" class="inline"><input type="hidden" name="${c.group ? 'group' : 'id'}" value="${esc(c.group ?? c.id ?? '')}">
 <button class="primary">${c.group ? 'Yes, delete group' : 'Yes, revoke'}</button><a class="btn" href="/dashboard/files">Cancel</a></form></div>` : '';
-    const groups = groupFiles(f?.items ?? []).map((g) => {
-      const body = g.labels.map((l) => `${l.label ? `<h3>${esc(l.label)}</h3>` : ''}<ul class="list">${l.items.map(fileRow).join('')}</ul>`).join('');
-      if (g.name === null) return `${groupFiles(f?.items ?? []).length > 1 ? '<h2 class="other">Other files</h2>' : ''}${body}`;
-      const first = g.labels.flatMap((l) => l.items).find((x) => viewKind(x.name) === 'image');
-      const n = g.labels.reduce((t, l) => t + l.items.length, 0);
-      return `<section class="card group"><div class="grouphead"><h2 class="grow">${esc(g.name)} <span class="muted">· ${n} file${n === 1 ? '' : 's'}</span></h2>
-${first ? `<a class="btn" href="/view/${enc(first.id)}/${enc(first.name)}">View all</a>` : ''}<a class="btn" href="/dashboard/files?revoke_group=${enc(g.name)}">Delete group</a></div>${body}</section>`;
+    const all = groupFiles(f?.items ?? []);
+    const groups = all.map((g) => {
+      const rows = (showBy: boolean) => g.labels.map((l) => `${l.label ? `<h3>${esc(l.label)}</h3>` : ''}<ul class="list">${l.items.map((x) => fileRow(x, showBy)).join('')}</ul>`).join('');
+      if (g.name === null) return `${all.length > 1 ? '<h2 class="other">Other files</h2>' : ''}${rows(true)}`;
+      const items = g.labels.flatMap((l) => l.items);
+      const first = items.find((x) => viewKind(x.name) === 'image');
+      const by = [...new Set(items.map(sharedBy))].join(', ');
+      const at = Math.min(...items.map((x) => x.created));
+      return `<details class="card group" data-g="${esc(g.name)}" open><summary class="grouphead"><span class="grow"><h2>${esc(g.name)} <span class="muted">· ${items.length} file${items.length === 1 ? '' : 's'}</span></h2>
+<span class="muted">${sharedText(at, by)}</span></span>${first ? `<a class="btn" href="/view/${enc(first.id)}/${enc(first.name)}">View all</a>` : ''}<a class="btn" href="/dashboard/files?revoke_group=${enc(g.name)}">Delete group</a></summary>${rows(false)}</details>`;
     }).join('');
     return `<h1>Files</h1>
 <p class="muted">Files your agent shares. They stream from your machine to this browser and are never stored here. Ask Claude to share one (file_share, optionally with a group).</p>
@@ -220,7 +224,7 @@ input[type=checkbox]{width:20px;height:20px;vertical-align:middle;margin-right:8
 form.inline{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .pill{display:inline-block;padding:2px 12px;border-radius:99px;border:1px solid var(--line);font-size:14px}.pill.on{color:var(--ok);border-color:var(--ok)}
 .steps{padding-left:20px}a{color:var(--accent)}
-h3{font-size:.95rem;margin:12px 0 0;color:var(--muted);font-weight:600}.grouphead{display:flex;flex-wrap:wrap;align-items:center;gap:8px 8px}.grouphead h2{margin:0;flex:1 1 200px}.group .list{margin:4px 0 8px}.other{margin:24px 0 0}
+h3{font-size:.95rem;margin:12px 0 0;color:var(--muted);font-weight:600}.grouphead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;cursor:pointer;list-style:none}.grouphead::-webkit-details-marker{display:none}.grouphead::before{content:'\\25B8';color:var(--muted);width:1em}details[open]>.grouphead::before{content:'\\25BE'}.grouphead .grow{flex:1 1 200px;min-width:0}.grouphead h2{margin:0;display:block}.group .list{margin:4px 0 8px}.other{margin:24px 0 0}
 @media (max-width:720px){
 .shell{grid-template-columns:minmax(0,1fr)}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 16px 0;flex-direction:row;flex-wrap:wrap;align-items:center}
 .brand{padding:0 0 8px;flex:1}.who{margin:0 0 8px;padding:0}.who .name{display:none}.who form{margin:0}
@@ -236,10 +240,11 @@ var timer=null,seen=false,es=new EventSource('/dashboard/events');
 function refresh(){
   clearTimeout(timer);
   timer=setTimeout(function(){
+    var open={};document.querySelectorAll('details[data-g]').forEach(function(x){open[x.dataset.g]=x.open});
     fetch(location.href,{credentials:'same-origin'}).then(function(r){return r.ok?r.text():null}).then(function(h){
       if(!h)return;
       var d=new DOMParser().parseFromString(h,'text/html'),n=d.querySelector('main.content'),c=document.querySelector('main.content');
-      if(n&&c)c.innerHTML=n.innerHTML;
+      if(n&&c){c.innerHTML=n.innerHTML;document.querySelectorAll('details[data-g]').forEach(function(x){if(x.dataset.g in open)x.open=open[x.dataset.g]})}
     }).catch(function(){});
   },250);
 }

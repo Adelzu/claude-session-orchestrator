@@ -141,9 +141,9 @@ async function fetchFiles(stub: ReturnType<typeof hub>, online: boolean): Promis
   if (!online) return { ok: false, items: [], error: 'Your agent is offline, so shared files cannot be listed.' };
   const r = (await stub.call('file_list', {}, 8000)) as unknown as { content?: { text?: string }[]; isError?: boolean } | null;
   try {
-    const j = JSON.parse(r?.content?.[0]?.text ?? '') as { summary?: string; files?: { id: string; name: string; size: number; expires: string; group?: string | null; label?: string | null }[] };
+    const j = JSON.parse(r?.content?.[0]?.text ?? '') as { summary?: string; files?: { id: string; name: string; size: number; expires: string; group?: string | null; label?: string | null; created?: number; session?: string | null; machine?: string | null }[] };
     if (r?.isError || !Array.isArray(j.files)) return { ok: false, items: [], error: j.summary ?? 'Files are unavailable.' };
-    return { ok: true, items: j.files.map((f) => ({ id: String(f.id), name: String(f.name), size: Number(f.size), expires: Date.parse(f.expires), group: f.group ?? null, label: f.label ?? null })) };
+    return { ok: true, items: j.files.map((f) => ({ id: String(f.id), name: String(f.name), size: Number(f.size), expires: Date.parse(f.expires), group: f.group ?? null, label: f.label ?? null, created: Number(f.created) || 0, session: f.session ?? null, machine: f.machine ?? null })) };
   } catch {
     return { ok: false, items: [], error: 'The agent did not return a file list. Is it up to date?' };
   }
