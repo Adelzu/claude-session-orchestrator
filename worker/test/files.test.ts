@@ -146,17 +146,17 @@ test('responseHeaders: inline only for safe types, otherwise forced to a downloa
   assert.ok(![...SAFE_INLINE].some((t) => /html|svg|xml|javascript/.test(t)));
 });
 
-const R = (id: string, name: string, group: string | null, label: string | null) => ({ id, name, size: 1, expires: 1, group, label, created: 1, session: null, machine: null });
+const R = (id: string, name: string, group: string | null, label: string | null, created = 1) => ({ id, name, size: 1, expires: 1, group, label, created, session: null, machine: null });
 
-test('groupFiles: groups A-Z, ungrouped last, labels A-Z, files A-Z', () => {
-  const g = groupFiles([R('4', 'z.txt', null, null), R('3', 'b.png', 'beta', '2560x1440'), R('2', 'a.png', 'alpha', '1920x1080'), R('1', 'S02.png', 'alpha', '1920x1080'), R('5', 'S00.png', 'alpha', '2560x1440')]);
-  assert.deepEqual(g.map((x) => x.name), ['alpha', 'beta', null]);
-  assert.deepEqual(g[0]!.labels.map((l) => [l.label, l.items.map((i) => i.name)]), [['1920x1080', ['a.png', 'S02.png']], ['2560x1440', ['S00.png']]]);
+test('groupFiles: newest group first, ungrouped last, files newest first, labels by first appearance', () => {
+  const g = groupFiles([R('4', 'z.txt', null, null, 9), R('3', 'b.png', 'beta', '2560x1440', 30), R('2', 'a.png', 'alpha', '1920x1080', 10), R('1', 'S02.png', 'alpha', '1920x1080', 20), R('5', 'S00.png', 'alpha', '2560x1440', 15)]);
+  assert.deepEqual(g.map((x) => x.name), ['beta', 'alpha', null]);
+  assert.deepEqual(g[1]!.labels.map((l) => [l.label, l.items.map((i) => i.name)]), [['1920x1080', ['S02.png', 'a.png']], ['2560x1440', ['S00.png']]]);
 });
 
 test('carouselOf: only images of the same group, in display order, with the right index', () => {
   const items = [
-    R('a', 'S00.png', 'g', '1920x1080'), R('b', 'S02.png', 'g', '1920x1080'), R('c', 'S00.png', 'g', '2560x1440'),
+    R('a', 'S00.png', 'g', '1920x1080', 3), R('b', 'S02.png', 'g', '1920x1080', 2), R('c', 'S00.png', 'g', '2560x1440', 1),
     R('d', 'doc.pdf', 'g', '2560x1440'), R('e', 'other.png', 'h', null), R('f', 'solo.png', null, null),
   ];
   const c = carouselOf(items, 'c')!;

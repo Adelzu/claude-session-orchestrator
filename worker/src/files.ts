@@ -30,18 +30,19 @@ export const SAFE_INLINE = new Set(['image/png', 'image/jpeg', 'image/gif', 'ima
 
 export interface FileRow { id: string; name: string; size: number; expires: number; group: string | null; label: string | null; created: number; session: string | null; machine: string | null }
 export interface ViewItem { id: string; name: string; label: string | null }
-const byLabelName = (a: FileRow, b: FileRow) => (a.label ?? '').localeCompare(b.label ?? '') || a.name.localeCompare(b.name);
+const byNewest = (a: FileRow, b: FileRow) => b.created - a.created || a.name.localeCompare(b.name);
 
-/** Named groups A-Z, then the ungrouped files; inside a group: sub-labels A-Z, files A-Z. */
+/** Named groups newest share first, then the ungrouped files; inside a group: files newest first, sub-labels in the order they first appear. */
 export function groupFiles(items: FileRow[]): { name: string | null; labels: { label: string | null; items: FileRow[] }[] }[] {
   const groups = new Map<string | null, FileRow[]>();
-  for (const f of [...items].sort(byLabelName)) groups.set(f.group, [...(groups.get(f.group) ?? []), f]);
-  const names = [...groups.keys()].sort((a, b) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)));
+  for (const f of [...items].sort(byNewest)) groups.set(f.group, [...(groups.get(f.group) ?? []), f]);
+  const newest = (n: string | null) => groups.get(n)![0]!.created;
+  const names = [...groups.keys()].sort((a, b) => (a === null ? 1 : b === null ? -1 : newest(b) - newest(a) || a.localeCompare(b)));
   return names.map((name) => {
     const labels: { label: string | null; items: FileRow[] }[] = [];
     for (const f of groups.get(name)!) {
-      const last = labels.at(-1);
-      if (last && last.label === f.label) last.items.push(f); else labels.push({ label: f.label, items: [f] });
+      const same = labels.find((l) => l.label === f.label);
+      if (same) same.items.push(f); else labels.push({ label: f.label, items: [f] });
     }
     return { name, labels };
   });
@@ -51,7 +52,7 @@ export function groupFiles(items: FileRow[]): { name: string | null; labels: { l
 export function carouselOf(items: FileRow[], id: string): { items: ViewItem[]; index: number } | null {
   const me = items.find((f) => f.id === id);
   if (!me) return null;
-  const list = items.filter((f) => f.group === me.group && viewKind(f.name) === 'image').sort(byLabelName);
+  const list = groupFiles(items.filter((f) => f.group === me.group && viewKind(f.name) === 'image'))[0]?.labels.flatMap((l) => l.items) ?? [];
   const index = list.findIndex((f) => f.id === id);
   return index < 0 ? null : { items: list.map((f) => ({ id: f.id, name: f.name, label: f.label })), index };
 }

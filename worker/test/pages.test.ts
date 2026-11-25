@@ -168,10 +168,12 @@ test('files: groups are collapsible (details, open by default) and say who share
   assert.match(h, /<details class="card group" data-g="watermark-lighter" open><summary class="grouphead">/);
   assert.match(h, /<\/ul><\/details>/);
   // group header: sessions (deduplicated), earliest time, relative time
-  assert.match(h, /shared by cc-filetest on hub, cc-other on hub · 2026-11-25 14:41 UTC \(/);
+  assert.match(h, /shared by cc-other on hub, cc-filetest on hub · 2026-11-25 14:41 UTC \(/);
   // ungrouped files carry their own label and time
   assert.match(h, /shared by orchestrator · 2026-11-25 09:00 UTC/);
   assert.match(h, /shared by cc-solo on hub · 2026-11-25 10:00 UTC/);
+  // newest first: ungrouped n.txt (10:00) above doc.pdf (09:00)
+  assert.ok(h.indexOf('n.txt') < h.indexOf('doc.pdf'));
   // grouped rows do not repeat it
   const groupBody = h.slice(h.indexOf('<details'), h.indexOf('</details>'));
   assert.doesNotMatch(groupBody.split('</summary>')[1]!, /shared by/);
