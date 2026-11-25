@@ -26,11 +26,12 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
                                           └───── hooks POST /events (Bearer EVENTS_TOKEN) ─────┘
 ```
 
-## Tools (25)
+## Tools (28)
 
 | Tool | What it does |
 | --- | --- |
 | `overview()` | One line per session, plus what is waiting on you. "How are my projects doing?" |
+| `file_share(path, ttl_minutes?)`, `file_list()`, `file_revoke(id)` | Share a file from the hub for download (see File handoff) |
 | `events_pending()` | Sessions waiting for your input or approval, oldest first |
 | `machine_list()` / `machine_status(machine)` | Reachability, session count, laptop power (AC or battery); CPU, RAM, disk, GPU/VRAM, link type, LLM endpoints |
 | `session_list(machine?)` | Status: `working`, `waiting_input`, `waiting_approval`, `idle` or `stopped` |
@@ -111,18 +112,27 @@ Instead of exposing your own server, sign in to the hosted service with GitHub o
    ORCH_CLOUD_URL=wss://<service>/agent
    ORCH_AGENT_TOKEN=cso_...
    ```
-3. Run `npm start` as usual. The agent connects out (nothing listens publicly) and serves the same 25 tools to your signed-in account only.
+3. Run `npm start` as usual. The agent connects out (nothing listens publicly) and serves the same 28 tools to your signed-in account only.
 
 The hosted part, in `worker/`, is a Cloudflare Worker. It handles OAuth 2.1 with `@cloudflare/workers-oauth-provider`, runs a stateless `/mcp` endpoint, and keeps one Durable Object per user holding that user's agent connection. It stores no tool arguments, sessions, keys or notes. Those stay on your machine. See [worker/README.md](worker/README.md) to deploy your own.
 
 Sign-in is locked down: a provider (GitHub, Google) is enabled only when both its client id and secret are set; each has its own allowlist (`ALLOWED_GITHUB_IDS`, `ALLOWED_GOOGLE_EMAILS` with verified emails only); an empty or unset list denies everyone, and with no provider configured nobody can sign in. A dashboard Users panel to manage the lists is planned. Details in [worker/README.md](worker/README.md#who-can-sign-in).
+
+### File handoff
+
+`file_share` makes a file on the hub downloadable from the dashboard (`/dashboard/files`) for the signed-in owner only. Nothing is stored in the cloud: the bytes stream from the hub through the worker over the agent connection while you download, with resume (`Range`) support.
+
+- Needs agent mode (`ORCH_CLOUD_URL`) and `FILE_SHARE_ROOTS` in `.env` (comma-separated folders; unset means nothing can be shared).
+- Refused: files outside the roots, dotfiles or anything inside a dot folder (`.env`, `.ssh`, `.git`), folders, and files over `FILE_SHARE_MAX_MB` (default 1024). Symlinks are resolved first.
+- Links expire: default 30 minutes, at most 24 hours (`ttl_minutes`). Revoke any time; a running download is cut.
+- Opening a link without being signed in gives an error, never the file. Phone: sign in once in Chrome (it resumes with `Range`); download managers such as 1DM or ADM need their built-in browser to sign in.
 
 ## Configuration
 
 - `machines.yaml`: `id`, `ssh_host`, `user`, `os` (`linux` or `macos`), `projects_root`, `local: true` for the hub itself, and an optional `claude_cmd`.
 - `projects.yaml`: `id`, spoken `aliases`, default `machine`, `path`, optional `repo` (git URL, cloned when a machine lacks the folder), and `shared` brain paths to always include. `session_start create=true` appends new projects here.
 - `llm.yaml`: `endpoints` (`id`, `machine`, `url` including `/v1`, `model`, `ctx`, `requires_ac`), `routing.order`, and `agents` (`url` or `cmd`).
-- `.env`: `EVENTS_TOKEN`, `MCP_TOKEN`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `PORT`, `HOST`, `DB_PATH`, `CONFIG_DIR`, `BRAIN_DIR`, `REMOTE_BRAIN_DIR`, `BRAIN_PUSH`, `LLM_TIMEOUT_S`.
+- `.env`: `FILE_SHARE_ROOTS`, `FILE_SHARE_MAX_MB`, `EVENTS_TOKEN`, `MCP_TOKEN`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `PORT`, `HOST`, `DB_PATH`, `CONFIG_DIR`, `BRAIN_DIR`, `REMOTE_BRAIN_DIR`, `BRAIN_PUSH`, `LLM_TIMEOUT_S`.
 
 ### Shared memory layout
 

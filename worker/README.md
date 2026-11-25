@@ -41,6 +41,28 @@ into another tenant. The lists are read on every sign-in; changing one needs no 
 Planned (a proposal, not built): an owner-only "Users" section in the dashboard to add and remove people on both lists
 instead of editing variables. See `docs/plans/approve-and-file-share.md`.
 
+## Dashboard
+
+`/dashboard` has a sidebar (tabs on phones) with one section per page: **Setup** (connector URL, getting started),
+**Machines** (agent online status, create and revoke tokens), **Files** (files your agent shares: download, revoke) and,
+for owners, **Settings**. Sections are small modules in `src/pages.ts` (`SECTIONS`), so Users or Approvals can be added later.
+
+Files are served at `/f/<id>/<name>` to the signed-in owner only (the same session cookie as the dashboard). The Worker asks
+your own Durable Object, which streams the bytes from your agent over its WebSocket. Nothing is stored in R2 or KV.
+
+## Settings (owners)
+
+Set `OWNER_IDS` (comma-separated user ids, such as `github-12345`). No owners configured means no Settings section.
+Owners can change, with no redeploy (stored in KV key `cso:settings`, applied within about a minute):
+
+- **Landing page on/off.** Off: `/` and every unknown path return a plain 404, with no sign-in button. Sign-in is only at the secret path.
+  `/privacy`, `/mcp`, the OAuth routes (`/authorize`, `/token`, `/register`, `/.well-known/*`, `/callback`) and `/agent` keep working.
+- **Secret login path** (one segment, 8 to 64 characters, e.g. `/k3v9-long-random`). Sign-in links live at that path and `<path>/<provider>`.
+
+The domain itself is fixed. `PUBLIC_LANDING` (`off`, `0`, `false`, `no`) and `LOGIN_PATH` are only starting values; the saved
+settings win. Safety rules: hiding the landing page needs a login path (otherwise it stays visible, so nobody is locked out).
+If you lose the path, delete the `cso:settings` key from KV and set `LOGIN_PATH`.
+
 The OAuth apps' callback URL is `https://<worker-host>/callback`, for both GitHub and Google.
 
 ## Develop

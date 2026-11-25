@@ -9,7 +9,9 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { authorizeUrl, exchange, providers, type Provider } from './identity.ts';
-import { consentPage, dashboardPage, homePage, messagePage, privacyPage } from './pages.ts';
+import { consentPage, dashboardPage, homePage, messagePage, privacyPage, sectionFor, signInPage, type DashData } from './pages.ts';
+import { parseFilePath } from './files.ts';
+import { SETTINGS_KEY, generateLoginPath, publicRoute, resolveSettings, validateChange, type Resolved, type Stored } from './settings.ts';
 import { UserHub, type ToolInfo } from './hub.ts';
 
 export { UserHub };
@@ -21,6 +23,7 @@ export interface Env {
   COOKIE_SECRET: string;
   GITHUB_CLIENT_ID?: string; GITHUB_CLIENT_SECRET?: string; ALLOWED_GITHUB_IDS?: string;
   GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string; ALLOWED_GOOGLE_EMAILS?: string;
+  OWNER_IDS?: string; LOGIN_PATH?: string; PUBLIC_LANDING?: string;
   DEV_LOGIN?: string;
 }
 interface Props { userId: string; name: string }
@@ -122,14 +125,67 @@ async function revokeToken(env: Env, userId: string, id: string) {
   await hub(env, userId).disconnect(id);
 }
 
+// ---------- settings, owners, dashboard helpers ----------
+
+const notFound = () => new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+/** Settings (KV) over env defaults. A KV hiccup falls back to the env values. */
+async function loadSettings(env: Env): Promise<Resolved> {
+  let stored: Stored | null = null;
+  try { stored = await env.OAUTH_KV.get<Stored>(SETTINGS_KEY, 'json'); } catch { /* env values apply */ }
+  return resolveSettings(env, stored);
+}
+/** Owners (OWNER_IDS, comma-separated user ids such as github-123) may change Settings; none configured = nobody. */
+const isOwner = (env: Env, userId: string) => (env.OWNER_IDS ?? '').split(',').map((x) => x.trim()).filter(Boolean).includes(userId);
+
+async function fetchFiles(stub: ReturnType<typeof hub>, online: boolean): Promise<NonNullable<DashData['files']>> {
+  if (!online) return { ok: false, items: [], error: 'Your agent is offline, so shared files cannot be listed.' };
+  const r = (await stub.call('file_list', {}, 8000)) as unknown as { content?: { text?: string }[]; isError?: boolean } | null;
+  try {
+    const j = JSON.parse(r?.content?.[0]?.text ?? '') as { summary?: string; files?: { id: string; name: string; size: number; expires: string }[] };
+    if (r?.isError || !Array.isArray(j.files)) return { ok: false, items: [], error: j.summary ?? 'Files are unavailable.' };
+    return { ok: true, items: j.files.map((f) => ({ id: String(f.id), name: String(f.name), size: Number(f.size), expires: Date.parse(f.expires) })) };
+  } catch {
+    return { ok: false, items: [], error: 'The agent did not return a file list. Is it up to date?' };
+  }
+}
+
+async function dashboardResponse(env: Env, origin: string, session: Props, active: string, s: Resolved, extra: { newToken?: string; flash?: string; settingsError?: string; status?: number } = {}) {
+  const stub = hub(env, session.userId);
+  const status = await stub.status();
+  const data: DashData = { origin, user: session, owner: isOwner(env, session.userId), active, status, tokens: [], newToken: extra.newToken ?? null, files: null, settings: null, flash: extra.flash ?? null };
+  if (active === 'machines') data.tokens = await listTokens(env, session.userId);
+  if (active === 'files') data.files = await fetchFiles(stub, status.online);
+  if (active === 'settings' && data.owner) data.settings = { resolved: s, error: extra.settingsError };
+  return html(dashboardPage(data), extra.status ?? 200);
+}
+
 // ---------- routes ----------
+
+async function startLogin(request: Request, env: Env, provider: Provider, devUser: string) {
+  const state = `dash.${b64u(crypto.getRandomValues(new Uint8Array(24)))}`;
+  const verifier = crypto.randomUUID() + crypto.randomUUID();
+  const headers = new Headers({ location: await authorizeUrl(provider, request, env, state, verifier, devUser) });
+  headers.append('set-cookie', setCookie(LOGIN, await seal(env, { state, verifier, provider }, 600), 600));
+  return new Response(null, { status: 302, headers });
+}
 
 async function handle(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const oauth = env.OAUTH_PROVIDER;
+  const set = await loadSettings(env);
+  const footer = !set.hidden; // with the landing page hidden, no page links around the site
+  const loginHref = (p: Provider) => (set.hidden ? `${set.loginPath}/${p}` : `/login?provider=${p}`);
 
-  if (url.pathname === '/') return html(homePage(url.origin));
-  if (url.pathname === '/privacy') return html(privacyPage(url.origin));
+  const pub = publicRoute(url.pathname, set);
+  if (pub?.kind === 'not-found') return notFound();
+  if (pub?.kind === 'home') return html(homePage(url.origin));
+  if (pub?.kind === 'privacy') return html(privacyPage(url.origin, footer));
+  if (pub?.kind === 'login-page') return html(signInPage(providers(request, env), loginHref, footer));
+  if (pub?.kind === 'login-start' || pub?.kind === 'legacy-login') {
+    const provider = (pub.kind === 'login-start' ? pub.provider : url.searchParams.get('provider')) as Provider;
+    if (!providers(request, env).includes(provider)) return html(messagePage('Unknown sign-in provider.', footer), 400);
+    return startLogin(request, env, provider, url.searchParams.get('as') ?? 'local');
+  }
 
   // The user's agent dials in here with its token.
   if (url.pathname === '/agent') {
@@ -146,7 +202,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const authReq = await oauth.parseAuthRequest(request);
     const details = await oauth.describeConsent(authReq);
     const consent = await oauth.beginConsent(authReq);
-    return html(consentPage(details, consent.handle, providers(request, env)), 200, consent.headers);
+    return html(consentPage(details, consent.handle, providers(request, env), footer), 200, consent.headers);
   }
   if (url.pathname === '/authorize' && request.method === 'POST') {
     const form = await request.formData();
@@ -168,8 +224,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
     // Dashboard sign-in (our own state, bound to a signed cookie).
     if (state.startsWith('dash.')) {
       const login = await unseal<{ state: string; verifier: string; provider: Provider }>(env, cookie(request, LOGIN));
-      if (!login || login.state !== state || url.searchParams.get('error')) return html(messagePage('Sign-in failed or expired. Please try again.'), 400);
-      if (!providers(request, env).includes(login.provider)) return html(messagePage('Not found.'), 404);
+      if (!login || login.state !== state || url.searchParams.get('error')) return html(messagePage('Sign-in failed or expired. Please try again.', footer), 400);
+      if (!providers(request, env).includes(login.provider)) return html(messagePage('Not found.', footer), 404);
       const who = await exchange(login.provider, request, env, url.searchParams.get('code') ?? '', login.verifier);
       const headers = new Headers({ location: '/dashboard' });
       headers.append('set-cookie', setCookie(SESSION, await seal(env, who, 7 * 86400), 7 * 86400));
@@ -178,7 +234,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
     // MCP client authorization.
     const resumed = await oauth.finishUpstream<{ verifier: string; provider: Provider }>(request);
-    if (!providers(request, env).includes(resumed.data.provider)) return html(messagePage('Not found.'), 404);
+    if (!providers(request, env).includes(resumed.data.provider)) return html(messagePage('Not found.', footer), 404);
     if (url.searchParams.get('error')) {
       resumed.headers.set('location', authorizationErrorRedirect(resumed.request, 'access_denied'));
       return new Response(null, { status: 302, headers: resumed.headers });
@@ -192,39 +248,58 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return new Response(null, { status: 302, headers: resumed.headers });
   }
 
-  // Dashboard.
-  if (url.pathname === '/login') {
-    const provider = url.searchParams.get('provider') as Provider;
-    if (!providers(request, env).includes(provider)) return html(messagePage('Unknown sign-in provider.'), 400);
-    const state = `dash.${b64u(crypto.getRandomValues(new Uint8Array(24)))}`;
-    const verifier = crypto.randomUUID() + crypto.randomUUID();
-    const headers = new Headers({ location: await authorizeUrl(provider, request, env, state, verifier, url.searchParams.get('as') ?? 'local') });
-    headers.append('set-cookie', setCookie(LOGIN, await seal(env, { state, verifier, provider }, 600), 600));
-    return new Response(null, { status: 302, headers });
-  }
+  // Dashboard and file downloads: same signed session cookie. Without one, a hidden site answers 404.
   const session = await unseal<Props>(env, cookie(request, SESSION));
-  if (url.pathname === '/dashboard' && request.method === 'GET') {
-    if (!session) return html(dashboardPage(url.origin, null, [], null, null, providers(request, env)));
-    const [tokens, status] = await Promise.all([listTokens(env, session.userId), hub(env, session.userId).status()]);
-    return html(dashboardPage(url.origin, session, tokens, status, null, providers(request, env)));
+  const signedOut = () => (set.hidden ? notFound() : html(signInPage(providers(request, env), loginHref, footer)));
+
+  const fileId = parseFilePath(url.pathname);
+  if (fileId && (request.method === 'GET' || request.method === 'HEAD')) {
+    if (!session) return set.hidden ? notFound() : html(messagePage('Sign in at the dashboard first, then open this link again.', footer), 401);
+    const headers = new Headers();
+    for (const h of ['range', 'if-range']) { const v = request.headers.get(h); if (v) headers.set(h, v); }
+    // The user's own Durable Object: an id from someone else's hub can never resolve here.
+    return hub(env, session.userId).fetch(new Request(`https://hub/file/${fileId}`, { method: request.method, headers }));
+  }
+
+  const sec = sectionFor(url.pathname);
+  if (sec && request.method === 'GET') {
+    if (!session) return signedOut();
+    if (sec.ownerOnly && !isOwner(env, session.userId)) return notFound();
+    return dashboardResponse(env, url.origin, session, sec.id, set);
   }
   if (url.pathname.startsWith('/dashboard/') && request.method === 'POST') {
     // CSRF: same-origin form posts only (plus SameSite=Lax session cookie).
     if (request.headers.get('origin') !== url.origin) return new Response('cross-site request refused', { status: 403 });
-    if (!session) return Response.redirect(`${url.origin}/dashboard`, 303);
+    if (!session) return set.hidden ? notFound() : Response.redirect(`${url.origin}/dashboard`, 303);
     const form = await request.formData();
     if (url.pathname === '/dashboard/tokens') {
       const token = await createToken(env, session.userId, String(form.get('label') ?? ''));
-      const [tokens, status] = await Promise.all([listTokens(env, session.userId), hub(env, session.userId).status()]);
-      return html(dashboardPage(url.origin, session, tokens, status, token, providers(request, env)));
+      return dashboardResponse(env, url.origin, session, 'machines', set, { newToken: token });
     }
-    if (url.pathname === '/dashboard/revoke') await revokeToken(env, session.userId, String(form.get('id')));
+    if (url.pathname === '/dashboard/revoke') {
+      await revokeToken(env, session.userId, String(form.get('id')));
+      return Response.redirect(`${url.origin}/dashboard/machines`, 303);
+    }
+    if (url.pathname === '/dashboard/files/revoke') {
+      const id = String(form.get('id') ?? '');
+      if (/^[A-Za-z0-9_-]{8,64}$/.test(id)) await hub(env, session.userId).call('file_revoke', { id }, 8000);
+      return Response.redirect(`${url.origin}/dashboard/files`, 303);
+    }
+    if (url.pathname === '/dashboard/settings') {
+      if (!isOwner(env, session.userId)) return notFound();
+      const loginPath = form.get('action') === 'generate' ? generateLoginPath() : String(form.get('login_path') ?? '');
+      const v = validateChange({ landing: form.get('landing') === '1', loginPath });
+      if (!v.ok) return dashboardResponse(env, url.origin, session, 'settings', set, { settingsError: v.error, status: 400 });
+      await env.OAUTH_KV.put(SETTINGS_KEY, JSON.stringify(v.stored));
+      console.log('settings changed');
+      return dashboardResponse(env, url.origin, session, 'settings', resolveSettings(env, v.stored), { flash: 'Saved. It applies within about a minute.' });
+    }
     if (url.pathname === '/dashboard/logout') {
       return new Response(null, { status: 303, headers: { location: '/dashboard', 'set-cookie': setCookie(SESSION, '', 0) } });
     }
     return Response.redirect(`${url.origin}/dashboard`, 303);
   }
-  return new Response('not found', { status: 404 });
+  return notFound();
 }
 
 const defaultHandler: ExportedHandler<Env> = {

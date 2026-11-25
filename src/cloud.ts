@@ -3,6 +3,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { FileTransfers } from './tools/files.ts';
+import type { Ctx } from './tools/common.ts';
 
 /**
  * How long the hub waits for a forwarded tool call. The SDK default is 60 s, which cut session_send short
@@ -14,7 +16,7 @@ export const TOOL_TIMEOUT_MS = 330_000;
 export const forwardCall = (client: Client, name: string, args: Record<string, unknown>) =>
   client.callTool({ name, arguments: args }, undefined, { timeout: TOOL_TIMEOUT_MS });
 
-export async function connectCloud(makeServer: () => McpServer, url: string, token: string) {
+export async function connectCloud(makeServer: () => McpServer, url: string, token: string, ctx?: Ctx) {
   const u = new URL(url);
   // The token must never travel in clear text: plain ws:// only for a local test server.
   if (u.protocol !== 'wss:' && !(u.protocol === 'ws:' && ['localhost', '127.0.0.1'].includes(u.hostname))) {
@@ -30,6 +32,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
   const open = () => {
     const ws = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } } as never);
     let lastPong = Date.now();
+    const transfers = ctx ? new FileTransfers(ctx, { send: (d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); } }) : undefined;
     let timer: ReturnType<typeof setInterval> | undefined;
     ws.onopen = () => {
       delay = 1000;
@@ -46,6 +49,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
       if (data === 'pong') { lastPong = Date.now(); return; }
       let msg: { type?: string; id?: string; name?: string; args?: Record<string, unknown> };
       try { msg = JSON.parse(data); } catch { return; }
+      if (transfers?.handles(msg.type)) return void transfers.onMessage(msg as never);
       if (msg.type !== 'call' || typeof msg.id !== 'string' || typeof msg.name !== 'string') return;
       let result;
       try {
@@ -57,6 +61,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
     };
     ws.onclose = (ev) => {
       clearInterval(timer);
+      transfers?.closeAll();
       if (ev.code === 4001) return console.error('cloud: agent token revoked; not reconnecting. Create a new token in the dashboard.');
       if (ev.code === 4000) return console.error('cloud: another agent connected with this account; this one stops.');
       console.error(`cloud: disconnected (${ev.code}${ev.reason ? ` ${ev.reason}` : ''}); retrying in ${delay / 1000}s`);

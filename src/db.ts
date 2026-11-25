@@ -41,6 +41,9 @@ export class Db {
       CREATE TABLE IF NOT EXISTS audit (
         id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, tool TEXT NOT NULL,
         args TEXT NOT NULL, ok INTEGER NOT NULL, error TEXT);
+      CREATE TABLE IF NOT EXISTS shares (
+        id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL,
+        created INTEGER NOT NULL, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
     `);
     // Columns added after the first release; ALTER fails harmlessly when they already exist.
     for (const col of ['claude_id TEXT', 'transcript TEXT', 'created INTEGER', 'target TEXT', 'tmux_session TEXT', 'claude_pid INTEGER', 'tmux_orig TEXT']) {

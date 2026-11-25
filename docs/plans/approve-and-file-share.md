@@ -27,31 +27,31 @@ Approve endpoint `POST /approve/<id>`
 
 Prompt text shown: tool + command/file, project, machine, first ~300 chars, truncated, never secrets from env.
 
-## 2. File handoff (DECIDED: always authenticated; REVISED: reuse the hub's existing sign-in, no separate password)
+## 2. File handoff (DECIDED by Adel; being built on feature/file-handoff)
 
-What the hub's login is (checked in code/.env): the Cloudflare Worker at orch.adelzu.com runs its own OAuth
-(not Cloudflare Access; no CF_ACCESS_* in ~/orch-server/.env). GitHub sign-in with an ALLOWED_GITHUB_IDS allowlist
-(Google is disabled). Browser session = HMAC-signed cookie `__Host-cso-session` (HttpOnly, Secure, SameSite=Lax) on
-the worker origin; Claude connector uses OAuth 2.1 on /mcp. The hub agent dials OUT to the worker over a WebSocket
-that carries only JSON tool calls. The hub itself only takes MCP_TOKEN/EVENTS_TOKEN on 127.0.0.1.
+Decisions
+- No cloud copies: bytes stream hub -> worker over the existing agent WebSocket, never stored (no R2/KV).
+- Authenticated exactly like the dashboard: session cookie (GitHub/Google sign-in, allowlisted). Never public, no bare links.
+- Lives in the dashboard: a "Files" section (name, size, expiry, Download, Revoke).
+- MCP tools: `file_share(path, ttl_minutes)`, `file_list`, `file_revoke`.
+- Limits: allowed roots only (FILE_SHARE_ROOTS, default none = refuse), no dotfiles/.env anywhere in the path,
+  size cap (FILE_SHARE_MAX_MB, default 1024), expiry default 30 min, max 24 h, Range/resume.
 
-Design
-- Download URL on the worker: `https://orch.adelzu.com/f/<token>/<name>`. Worker requires (1) a valid session cookie
-  whose userId is allowlisted AND equals the file's owner, and (2) an unexpired per-file token (random 128-bit,
-  default 30 min, max 24 h, optional one-time, revocable). No cookie = redirect to GitHub sign-in, never the file.
-- Bytes: worker asks the user's hub agent for the byte range over the existing agent WebSocket (new chunked
-  binary messages, Range-aware, backpressure); nothing stored in the cloud. Alternative: hub uploads to R2 (simple,
-  fast, resumable by Cloudflare, but the file is copied to Cloudflare storage and needs size/cost limits).
-- Approvals reuse the same cookie: `/approve/<id>` on the worker, same allowlist check, one-time id, expiry.
-- Tool `file_share(path, ttl, one_time?)` -> URL (no secret in it). Allowed paths/denylist/size limit/list/revoke as before.
+Mechanism
+- Hub keeps a `shares` table (id, path, name, size, created, expires, revoked). Id = random 128-bit.
+- URL: `https://<worker>/f/<id>/<name>`. Worker checks the session cookie, then asks that user's Durable Object
+  (per-user, so the id only resolves in the owner's hub). No cookie = 401 page, never the file.
+- Worker -> agent: `{type:'file', id, share, range, ifRange, head}`. Agent -> worker: JSON `file-head`
+  (status + headers, Range parsed on the hub), binary frames (36-byte request id + payload), JSON `file-end`/`file-error`.
+- Backpressure: agent sends at most 4 MB unacked; the worker acks as the client reads. Client abort -> `cancel`.
+- Hub re-validates at download time: realpath still under a root, not dotfile, not revoked/expired, size cap.
+  Revoke also aborts running downloads. Always `application/octet-stream` + attachment + nosniff.
+- Phone: Chrome signs in once and resumes with Range. 1DM/ADM need their built-in browser to sign in.
 
-Phone
-- Chrome: sign in once (cookie), its downloader sends cookies + Range, so resume works.
-- 1DM/ADM: they do not carry Chrome's cookies. Use their built-in browser (sign in there, they then reuse the
-  cookie and can resume), or download in Chrome. No separate password and no public link in either case.
-
-Tradeoff: worker relay is new code and Cloudflare Worker CPU/duration/WebSocket limits may cap large files
-(the mid-way resets could return); Tailscale-direct to the hub would avoid that but needs its own sign-in.
+Open notes for Adel
+- Cookie lasts 7 days and is not re-checked against the allowlist per request (same as the dashboard today).
+- Only files on the hub itself (the agent's machine), not other machines.
+- Cloudflare limits on very long streams are untested until deployed.
 
 ## 3. Admin panel for who may sign in (PROPOSAL, not decided)
 
@@ -88,6 +88,57 @@ Providers enabled only when client id AND secret are set; per-provider allowlist
 ALLOWED_GOOGLE_EMAILS, exact lowercased, email_verified true); default deny when empty; no provider configured = no
 sign-in; unconfigured provider routes refuse before any provider call. Dashboard Users panel (section 3) is the planned
 way to manage both lists. User docs: worker/README.md "Who can sign in".
+
+## 4. Dashboard UI revamp (DECIDED by Adel; built on feature/file-handoff, mockup below)
+Plain server-rendered HTML/CSS in worker/src/pages.ts, no framework, no client JS. One page per section so every
+section has its own URL (works without JS, easy to link). Light/dark via prefers-color-scheme.
+
+Sections (each a small module: `{ id, title, render(ctx) }` in a list; adding Users or Approvals later = one entry)
+- Setup `/dashboard` (default): connector URL to copy, 3 getting-started steps, agent start command.
+- Settings `/dashboard/settings` (owner-only): landing on/off and the secret login path (section 5).
+- Machines `/dashboard/machines`: online status, create token (shown once), list and revoke tokens.
+- Files `/dashboard/files`: shared files (name, size, expires in, Download, Revoke).
+- Later: Users, Approvals (hidden until built; Users owner-only).
+
+Desktop (sidebar):
+```
++--------------------------------------------------+
+| Session Orchestrator            adel  [Sign out] |
++-----------+--------------------------------------+
+| > Setup   |  Setup                               |
+|   Machines|  Connector URL                       |
+|   Files   |  [ https://orch.example/mcp ] [Copy] |
+|           |  Getting started                     |
+|           |  1 Add the connector in Claude       |
+|           |  2 Create a token under Machines     |
+|           |  3 Start the agent on your machine   |
++-----------+--------------------------------------+
+```
+Mobile (<720px): sidebar becomes a horizontal tab strip under the header, single column, 16px gutters, 44px targets:
+```
++------------------------------+
+| Session Orchestrator  Sign out|
+| [Setup] [Machines] [Files]  > |
+|------------------------------|
+| Machines                     |
+| (o) home-server  online 2 h  |
+|  token "home"  [Revoke]      |
+|  [ label........ ][Create]   |
++------------------------------+
+```
+Files row: `report.pdf  4.2 MB  expires in 28 min  [Download] [Revoke]` (stacks on mobile).
+
+## 5. Hide the public landing page + Settings (DECIDED by Adel; built on feature/file-handoff)
+Dropped: changing the subdomain. The host stays orch.adelzu.com; only the path is configurable.
+- Settings section in the dashboard, owner-only (`OWNER_IDS` env, user ids like github-123; none = no Settings).
+- Stored in KV `cso:settings` {landing, loginPath}; env `PUBLIC_LANDING` / `LOGIN_PATH` are starting values; KV wins; live, no redeploy
+  (KV edge cache: up to about a minute).
+- Landing off: `/`, `/login` and unknown paths return a plain 404 with no links; sign-in only at the secret path (`<path>` page, `<path>/<provider>`).
+  Dashboard and file links answer 404 without a session. Unchanged: `/mcp`, OAuth routes, `/callback`, `/agent`, `/privacy`
+  (kept public as a legal page, without site links; Adel can decide to hide it too).
+- Safety: login path = one segment, 8 to 64 chars, not a service name; landing off needs a login path, else the page stays shown (no lockout).
+  Recovery: delete KV key `cso:settings`, set LOGIN_PATH.
+- Note: `/authorize` (MCP consent) still shows provider buttons; the OAuth flow needs them.
 
 ## Open questions
 See reply to Adel.

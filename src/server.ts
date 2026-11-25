@@ -7,6 +7,7 @@ import { loadConfig } from './config.ts';
 import { Db } from './db.ts';
 import type { Ctx } from './tools/common.ts';
 import * as events from './tools/events.ts';
+import * as files from './tools/files.ts';
 import * as llm from './tools/llm.ts';
 import * as machines from './tools/machines.ts';
 import * as memory from './tools/memory.ts';
@@ -17,7 +18,7 @@ export const SERVER_INSTRUCTIONS = "Manages the user's Claude Code sessions on t
 
 export function mcpServer(ctx: Ctx) {
   const server = new McpServer({ name: 'session-orchestrator', version: '1.0.0' }, { instructions: SERVER_INSTRUCTIONS });
-  for (const mod of [machines, sessions, events, memory, llm]) mod.register(server, ctx);
+  for (const mod of [machines, sessions, events, files, memory, llm]) mod.register(server, ctx);
   return server;
 }
 
@@ -84,7 +85,7 @@ export async function main() {
   }
   // Agent mode for the hosted service: dial out and serve tool calls for the signed-in owner.
   if (process.env.ORCH_CLOUD_URL && process.env.ORCH_AGENT_TOKEN) {
-    await connectCloud(() => mcpServer(ctx), process.env.ORCH_CLOUD_URL, process.env.ORCH_AGENT_TOKEN);
+    await connectCloud(() => mcpServer(ctx), process.env.ORCH_CLOUD_URL, process.env.ORCH_AGENT_TOKEN, ctx);
   }
 }
 
