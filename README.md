@@ -129,6 +129,10 @@ Sign-in is locked down: a provider (GitHub, Google) is enabled only when both it
 - Links expire: default 30 minutes, at most 24 hours (`ttl_minutes`). Revoke any time; a running download is cut.
 - Opening a link without being signed in gives an error, never the file. Phone: sign in once in Chrome (it resumes with `Range`); download managers such as 1DM or ADM need their built-in browser to sign in.
 
+### File tools inside sessions
+
+When `MCP_TOKEN` is set, the hub adds a user-scope MCP entry (`orchestrator-files`, written with `claude mcp add-json`) at startup, so every Claude Code session on the hub can call `file_share`, `file_list` and `file_revoke` itself. It points at `/mcp-files`, which serves only those three tools (no session control) with its own token derived from `MCP_TOKEN` (it does not open `/mcp`, and `MCP_TOKEN` does not open it). Shares are still limited to `FILE_SHARE_ROOTS`. New sessions have the tools at once; a session that is already running gets them when it restarts or reloads its MCP servers. Files must be on the hub itself: sessions on other machines would need a hub-side copy.
+
 ## Configuration
 
 - `machines.yaml`: `id`, `ssh_host`, `user`, `os` (`linux` or `macos`), `projects_root`, `local: true` for the hub itself, and an optional `claude_cmd`.

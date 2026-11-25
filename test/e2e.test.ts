@@ -621,3 +621,28 @@ test('stopped rows come back when Claude Code runs in tmux; an unclear tmux answ
     for (const s of ['cc-demo-r001', 'cc-revadopt', 'revadopt']) execSync(`tmux kill-session -t '=${s}' 2>/dev/null || true`);
   }
 });
+
+test('/mcp-files: only the three file tools, own token; neither token opens the other endpoint', async () => {
+  const { filesToken } = await import('../src/auth.ts');
+  const ft = filesToken('mcp-secret');
+  assert.notEqual(ft, 'mcp-secret');
+  const post = (path: string, token?: string) => fetch(`${base}${path}`, {
+    method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+  }).then((r) => r.status);
+  assert.equal(await post('/mcp-files'), 401);
+  assert.equal(await post('/mcp-files', 'mcp-secret'), 401, 'the main token does not open the sessions endpoint');
+  assert.equal(await post('/mcp-files', 'wrong'), 401);
+  assert.equal(await post('/mcp', ft), 401, 'the files token cannot control sessions');
+  const c = new Client({ name: 'session', version: '0' });
+  await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp-files`), { requestInit: { headers: { authorization: `Bearer ${ft}` } } }));
+  try {
+    assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ['file_list', 'file_revoke', 'file_share']);
+    const r = await c.callTool({ name: 'file_list', arguments: {} }) as { isError?: boolean; content: { text: string }[] };
+    assert.ok(!r.isError);
+    assert.ok(Array.isArray(JSON.parse(r.content[0]!.text).files));
+    // Session control is not reachable here.
+    const denied = await c.callTool({ name: 'session_list', arguments: {} }).catch((e: Error) => ({ isError: true, content: [{ text: e.message }] })) as { isError?: boolean; content: { text: string }[] };
+    assert.ok(denied.isError && /not found|unknown/i.test(denied.content[0]!.text));
+  } finally { await c.close(); }
+});

@@ -64,3 +64,10 @@ export async function accessJwtOk(req: IncomingMessage, env = process.env): Prom
 
 /** Test hook: forget cached Access keys. */
 export const resetAccessKeys = () => { keys = undefined; };
+
+/**
+ * Token for the sessions' file-tools endpoint (/mcp-files): HMAC-SHA256(MCP_TOKEN, "orchestrator-files"). It opens
+ * only that endpoint (file_share, file_list, file_revoke), never /mcp, and needs no extra secret to store.
+ */
+export const filesToken = (mcpToken: string) => createHmac('sha256', mcpToken).update('orchestrator-files').digest('base64url');
+export const filesTokenOk = (req: IncomingMessage, mcpToken: string | undefined) => !!mcpToken && eq(bearer(req), filesToken(mcpToken));
