@@ -52,6 +52,9 @@ Images open in a full-screen viewer (`/view/<id>`) at actual size (one image pix
 arrows, arrow keys and swipe through the file's group, and a counter and name. PDF and plain text open inline; HTML and SVG never do
 (the hub and the Worker both enforce an allowlist of types, and every response carries `X-Content-Type-Options: nosniff`).
 
+The Files page updates live: the hub tells the Worker when shares change, and the Worker pushes it to open pages over Server-Sent
+Events (`/dashboard/events`, same session). Files that expire by time disappear on the next change or reload.
+
 Files are served at `/f/<id>/<name>` to the signed-in owner only (the same session cookie as the dashboard). The Worker asks
 your own Durable Object, which streams the bytes from your agent over its WebSocket. Nothing is stored in R2 or KV.
 

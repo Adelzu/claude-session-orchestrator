@@ -228,6 +228,26 @@ h3{font-size:.95rem;margin:12px 0 0;color:var(--muted);font-weight:600}.grouphea
 .side nav a[aria-current=page]{box-shadow:inset 0 -3px 0 var(--accent)}.content{padding:20px 16px}}
 `;
 
+/** Files page only: reload the list when the hub reports a change (Server-Sent Events); EventSource reconnects by itself. */
+const LIVE_SCRIPT = `<script>
+(function(){
+if(!window.EventSource)return;
+var timer=null,seen=false,es=new EventSource('/dashboard/events');
+function refresh(){
+  clearTimeout(timer);
+  timer=setTimeout(function(){
+    fetch(location.href,{credentials:'same-origin'}).then(function(r){return r.ok?r.text():null}).then(function(h){
+      if(!h)return;
+      var d=new DOMParser().parseFromString(h,'text/html'),n=d.querySelector('main.content'),c=document.querySelector('main.content');
+      if(n&&c)c.innerHTML=n.innerHTML;
+    }).catch(function(){});
+  },250);
+}
+es.addEventListener('files',refresh);
+es.onopen=function(){if(seen)refresh();seen=true};
+})();
+</script>`;
+
 export function dashboardPage(d: DashData) {
   const sections = SECTIONS.filter((s) => !s.ownerOnly || d.owner);
   const cur = sections.find((s) => s.id === d.active) ?? sections[0]!;
@@ -237,7 +257,7 @@ export function dashboardPage(d: DashData) {
 <title>${cur.title} · Session Orchestrator</title><style>${DASH_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">Session Orchestrator</div><nav aria-label="Dashboard sections">${nav}</nav>
 <div class="who"><span class="name muted">${esc(d.user.name)}</span><form method="post" action="/dashboard/logout"><button>Sign out</button></form></div></aside>
-<main class="content">${cur.render(d)}</main></div></body></html>`;
+<main class="content">${cur.render(d)}</main></div>${cur.id === 'files' ? LIVE_SCRIPT : ''}</body></html>`;
 }
 
 // ---------- full-screen image viewer: actual size, carousel (arrows, keys, swipe) ----------

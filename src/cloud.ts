@@ -3,7 +3,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { FileTransfers } from './tools/files.ts';
+import { FileTransfers, setFilesListener } from './tools/files.ts';
 import type { Ctx } from './tools/common.ts';
 
 /**
@@ -38,6 +38,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
       delay = 1000;
       lastPong = Date.now();
       ws.send(JSON.stringify({ type: 'hello', tools }));
+      setFilesListener(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'files-changed' })); });
       timer = setInterval(() => {
         if (Date.now() - lastPong > 75_000) return ws.close(); // dead link: reconnect
         ws.send('ping');
@@ -62,6 +63,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
     ws.onclose = (ev) => {
       clearInterval(timer);
       transfers?.closeAll();
+      setFilesListener(null);
       if (ev.code === 4001) return console.error('cloud: agent token revoked; not reconnecting. Create a new token in the dashboard.');
       if (ev.code === 4000) return console.error('cloud: another agent connected with this account; this one stops.');
       console.error(`cloud: disconnected (${ev.code}${ev.reason ? ` ${ev.reason}` : ''}); retrying in ${delay / 1000}s`);

@@ -147,3 +147,34 @@ export const expiresIn = (expires: number, now = Date.now()) => {
   const m = Math.round((expires - now) / 60_000);
   return m <= 0 ? 'expired' : m < 60 ? `${m} min` : `${Math.round(m / 6) / 10} h`;
 };
+
+/**
+ * Server-Sent Events fan-out for one user's open dashboard pages. The hub says "files changed"; every open page gets
+ * `event: files` and reloads its list. A comment line every so often keeps proxies from closing an idle stream.
+ */
+export class EventFeed {
+  private subs = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  private enc = new TextEncoder();
+  private max: number;
+  constructor(max = 20) { this.max = max; }
+  get size() { return this.subs.size; }
+
+  subscribe(): ReadableStream<Uint8Array> {
+    let me!: ReadableStreamDefaultController<Uint8Array>;
+    return new ReadableStream<Uint8Array>({
+      start: (c) => {
+        me = c;
+        this.subs.add(c);
+        c.enqueue(this.enc.encode('retry: 3000\n: connected\n\n'));
+        const [oldest] = this.subs;
+        if (this.subs.size > this.max && oldest) { this.subs.delete(oldest); try { oldest.close(); } catch { /* gone */ } }
+      },
+      cancel: () => { this.subs.delete(me); },
+    });
+  }
+  private send(text: string) {
+    for (const c of [...this.subs]) { try { c.enqueue(this.enc.encode(text)); } catch { this.subs.delete(c); } }
+  }
+  broadcast() { this.send('event: files\ndata: 1\n\n'); }
+  ping() { this.send(': ping\n\n'); }
+}

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Download, SAFE_INLINE, carouselOf, decodeFrame, expiresIn, groupFiles, humanSize, parseFilePath, parseViewPath, responseHeaders, viewKind } from '../src/files.ts';
+import { Download, EventFeed, SAFE_INLINE, carouselOf, decodeFrame, expiresIn, groupFiles, humanSize, parseFilePath, parseViewPath, responseHeaders, viewKind } from '../src/files.ts';
 
 const ID = '11111111-2222-3333-4444-555555555555';
 const frame = (id: string, data: number[]) => { const b = new Uint8Array(36 + data.length); b.set(new TextEncoder().encode(id)); b.set(data, 36); return b.buffer; };
@@ -166,4 +166,34 @@ test('carouselOf: only images of the same group, in display order, with the righ
   assert.equal(carouselOf(items, 'f')!.items.length, 1); // ungrouped: only the ungrouped images
   assert.equal(carouselOf(items, 'd'), null);            // a PDF has no carousel
   assert.equal(carouselOf(items, 'nope'), null);
+});
+
+const readText = async (r: ReadableStreamDefaultReader<Uint8Array>) => new TextDecoder().decode((await r.read()).value);
+
+test('EventFeed: subscribers get a hello, then every broadcast; cancel removes them', async () => {
+  const feed = new EventFeed();
+  const a = feed.subscribe().getReader(), b = feed.subscribe().getReader();
+  assert.equal(feed.size, 2);
+  assert.match(await readText(a), /retry: 3000/);
+  await readText(b);
+  feed.broadcast();
+  assert.equal(await readText(a), 'event: files\ndata: 1\n\n');
+  assert.equal(await readText(b), 'event: files\ndata: 1\n\n');
+  feed.ping();
+  assert.match(await readText(a), /^: ping/);
+  await b.cancel();
+  assert.equal(feed.size, 1);
+  feed.broadcast(); // no throw with a cancelled subscriber gone
+  assert.equal(await readText(a), 'event: files\ndata: 1\n\n');
+});
+
+test('EventFeed: a cap drops the oldest page, not the newest', async () => {
+  const feed = new EventFeed(2);
+  const r1 = feed.subscribe().getReader(); const r2 = feed.subscribe().getReader(); const r3 = feed.subscribe().getReader();
+  assert.equal(feed.size, 2);
+  await readText(r1); // hello
+  assert.equal((await r1.read()).done, true); // the oldest was closed
+  await readText(r2); await readText(r3);
+  feed.broadcast();
+  assert.match(await readText(r3), /event: files/);
 });

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Db } from '../src/db.ts';
 import { UserError } from '../src/config.ts';
 import type { Ctx } from '../src/tools/common.ts';
-import { FileTransfers, WINDOW_BYTES, checkPath, cleanTag, inlineType, limits, list, open, parseRange, revoke, revokeGroup, safeName, share, baseUrl, type Limits } from '../src/tools/files.ts';
+import { FileTransfers, WINDOW_BYTES, checkPath, cleanTag, inlineType, limits, list, open, parseRange, revoke, revokeGroup, safeName, setFilesListener, share, baseUrl, type Limits } from '../src/tools/files.ts';
 
 const BASE = 'https://orch.example';
 const setup = () => {
@@ -296,4 +296,30 @@ test('revokeGroup revokes only that group', () => {
   assert.equal(revokeGroup(ctx, 'g1', now), 1);
   assert.equal(revokeGroup(ctx, 'g1', now), 0);
   assert.deepEqual(list(ctx, now, BASE).map((f) => f.group), ['g2']);
+});
+
+test('files-changed notifier: once per burst, on share, update and revoke; silent for a failed revoke', async () => {
+  const { root, lim, ctx } = setup();
+  let n = 0;
+  setFilesListener(() => { n++; });
+  const wait = () => new Promise((r) => setTimeout(r, 260));
+  try {
+    const now = Date.now();
+    const a = share(ctx, join(root, 'a.txt'), 30, now, lim, BASE, { group: 'g' });
+    share(ctx, join(root, 'sub', 'b.bin'), 30, now, lim, BASE, { group: 'g' });
+    await wait();
+    assert.equal(n, 1, 'two shares in a burst are one event');
+    share(ctx, join(root, 'a.txt'), 30, now, lim, BASE, { group: 'h' }); // update
+    await wait();
+    assert.equal(n, 2);
+    assert.equal(revoke(ctx, 'nope-nope-nope'), false);
+    await wait();
+    assert.equal(n, 2, 'nothing changed, nothing sent');
+    revoke(ctx, a.id);
+    await wait();
+    assert.equal(n, 3);
+    revokeGroup(ctx, 'g', now);
+    await wait();
+    assert.equal(n, 4);
+  } finally { setFilesListener(null); }
 });

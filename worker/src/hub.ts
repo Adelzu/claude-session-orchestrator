@@ -3,7 +3,7 @@
 // agent's advertised tool list, so tools/list still answers while the agent is offline.
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './index.ts';
-import { Download, decodeFrame, responseHeaders, type HeadMsg } from './files.ts';
+import { Download, EventFeed, decodeFrame, responseHeaders, type HeadMsg } from './files.ts';
 
 export interface ToolInfo { name: string; title?: string; description?: string; inputSchema: unknown; annotations?: unknown }
 type Result = { content: unknown[]; isError?: boolean; [k: string]: unknown };
@@ -15,6 +15,8 @@ const MAX_TOOLS = 200;
 export class UserHub extends DurableObject<Env> {
   private pending = new Map<string, { resolve: (r: Result) => void; timer: ReturnType<typeof setTimeout> }>();
   private downloads = new Map<string, Download>();
+  private feed = new EventFeed();
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -26,10 +28,12 @@ export class UserHub extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path.startsWith('/file/')) return this.file(request, path.slice('/file/'.length));
+    if (path === '/events') return this.events();
     if (request.headers.get('upgrade') !== 'websocket') return new Response('expected websocket', { status: 426 });
     const { 0: client, 1: server } = new WebSocketPair();
     for (const old of this.ctx.getWebSockets('agent')) old.close(4000, 'replaced by a newer agent connection');
     this.ctx.acceptWebSocket(server, ['agent']);
+    this.feed.broadcast(); // pages show "agent offline" or the files again
     server.serializeAttachment({ since: Date.now(), tokenId: request.headers.get('x-agent-token-id') });
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -44,6 +48,8 @@ export class UserHub extends DurableObject<Env> {
     try { msg = JSON.parse(raw); } catch { return; }
     if (msg.type === 'hello' && Array.isArray(msg.tools)) {
       await this.ctx.storage.put('tools', msg.tools.slice(0, MAX_TOOLS));
+    } else if (msg.type === 'files-changed') {
+      this.feed.broadcast();
     } else if (msg.type === 'file-head' && typeof msg.id === 'string') {
       this.downloads.get(msg.id)?.onHead({ status: Number(msg.status) || 502, headers: msg.headers ?? {}, message: msg.message });
     } else if (msg.type === 'file-end' && typeof msg.id === 'string') {
@@ -57,6 +63,18 @@ export class UserHub extends DurableObject<Env> {
       this.pending.delete(msg.id);
       p.resolve(msg.result && Array.isArray(msg.result.content) ? msg.result : { content: [{ type: 'text', text: 'Malformed agent result.' }], isError: true });
     }
+  }
+
+  /** Live updates for the signed-in owner's dashboard (the Worker has checked the session). */
+  private events(): Response {
+    const stream = this.feed.subscribe();
+    if (!this.pingTimer) {
+      this.pingTimer = setInterval(() => {
+        this.feed.ping();
+        if (!this.feed.size && this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; } // nobody listens: let the object sleep
+      }, 20_000);
+    }
+    return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' } });
   }
 
   /** Stream one shared file from the agent to the caller (the Worker has already checked the signed-in owner). */
@@ -76,6 +94,7 @@ export class UserHub extends DurableObject<Env> {
 
   async webSocketClose(ws: WebSocket, code: number) {
     for (const d of this.downloads.values()) d.fail('The agent disconnected.');
+    this.feed.broadcast();
     ws.close(code === 1005 ? 1000 : code, 'closed');
   }
 

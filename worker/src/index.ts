@@ -280,6 +280,12 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return hub(env, session.userId).fetch(new Request(`https://hub/file/${fileId}`, { method: request.method, headers }));
   }
 
+  // Live updates (Server-Sent Events) for the Files page: same session as the rest of the dashboard.
+  if (url.pathname === '/dashboard/events' && request.method === 'GET') {
+    if (!session) return set.hidden ? notFound() : new Response('sign in first', { status: 401 });
+    return hub(env, session.userId).fetch(new Request('https://hub/events'));
+  }
+
   const viewId = parseViewPath(url.pathname);
   if (viewId && request.method === 'GET') {
     if (!session) return set.hidden ? notFound() : html(messagePage('Sign in at the dashboard first, then open this link again.', footer), 401);

@@ -29,7 +29,8 @@ test('dashboard: mobile and theme basics', () => {
   assert.match(h, /prefers-color-scheme:dark/);
   assert.match(h, /max-width:720px/);
   assert.match(h, /aria-current="page"/);
-  assert.doesNotMatch(h, /<script/); // no client JS
+  assert.doesNotMatch(dashboardPage(base({ active: 'setup' })), /<script/); // no client JS outside Files
+  assert.doesNotMatch(dashboardPage(base({ active: 'machines' })), /EventSource/);
 });
 
 test('setup: connector URL, steps and the warning about moving the address', () => {
@@ -144,4 +145,13 @@ test('viewer: actual-size image, counter, name, fit toggle, arrows as real links
   const evil = viewerPage([{ id: 'e'.repeat(22), name: '</script><img src=x onerror=alert(1)>.png', label: '"><b>' }], 0);
   assert.doesNotMatch(evil, /<\/script><img/);
   assert.doesNotMatch(evil, /<b>/);
+});
+
+test('files page: live updates over Server-Sent Events, refetching the same page', () => {
+  const h = dashboardPage(base({ active: 'files', files: { ok: true, items: [] } }));
+  assert.match(h, /new EventSource\('\/dashboard\/events'\)/);
+  assert.match(h, /addEventListener\('files'/);
+  assert.match(h, /fetch\(location\.href/);                 // keeps ?revoke=... confirm state
+  assert.match(h, /querySelector\('main\.content'\)/);       // a sign-in page (expired session) is ignored
+  assert.ok(h.indexOf('</main>') < h.indexOf('EventSource')); // the script lives outside the swapped area
 });

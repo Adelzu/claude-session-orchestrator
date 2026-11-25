@@ -18,6 +18,18 @@ export const MAX_TTL_MIN = 24 * 60;
 export const WINDOW_BYTES = 4 * 1024 * 1024;
 const CHUNK = 256 * 1024;
 
+/**
+ * The share list changed (shared, updated, revoked): tell whoever listens, once per burst. cloud.ts forwards it to the
+ * worker, which pushes it to open dashboard pages (Server-Sent Events). Expiry by time is not announced.
+ */
+let listener: (() => void) | null = null;
+let pending: ReturnType<typeof setTimeout> | null = null;
+export const setFilesListener = (fn: (() => void) | null) => { listener = fn; };
+const changed = () => {
+  if (pending || !listener) return;
+  pending = setTimeout(() => { pending = null; listener?.(); }, 150); // a group of 10 files is one event
+};
+
 export interface Limits { roots: string[]; maxBytes: number }
 
 /** Roots come from FILE_SHARE_ROOTS (comma separated, ~ allowed). No roots configured = nothing can be shared. */
@@ -107,11 +119,13 @@ export function share(ctx: Ctx, path: string, ttlMin = DEFAULT_TTL_MIN, now = Da
     const expires = now + ttlMin * 60_000;
     ctx.db.db.prepare(`UPDATE shares SET grp = ?, label = ?, expires = ?, size = ? WHERE id = ?`).run(grp, label, expires, size, same.id);
     const row = { ...same, grp, label, expires, size };
+    changed();
     return { ...row, url: urlOf(base, row) };
   }
   const row: ShareRow = { id: randomBytes(16).toString('base64url'), path: real, name: safeName(real), size, created: now, expires: now + ttlMin * 60_000, revoked: 0, grp, label };
   ctx.db.db.prepare(`INSERT INTO shares (id, path, name, size, created, expires, revoked, grp, label) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`)
     .run(row.id, row.path, row.name, row.size, row.created, row.expires, row.grp, row.label);
+  changed();
   return { ...row, url: urlOf(base, row) };
 }
 
@@ -124,6 +138,7 @@ const active = new Map<string, Set<AbortController>>();
 export function revoke(ctx: Ctx, id: string): boolean {
   const r = ctx.db.db.prepare(`UPDATE shares SET revoked = 1 WHERE id = ? AND revoked = 0`).run(id);
   for (const c of active.get(id) ?? []) c.abort(); // running downloads stop too
+  if (Number(r.changes) > 0) changed();
   return Number(r.changes) > 0;
 }
 
