@@ -68,7 +68,8 @@ export function register(server: McpServer, ctx: Ctx) {
   tool(server, ctx, 'events_wait', `Wait for the next event from any session or background job: a session went idle (finished), is waiting for input or approval, stopped or crashed, or an agent job finished or failed. Returns ONE event (oldest first) with its id, or event=null after the timeout. Pass the returned cursor next time so nothing is missed or repeated; without a cursor you get only events from now on. timeout_seconds is capped at ${MAX_WAIT_S}; on null just call again with the same cursor.`,
     { cursor: z.number().int().min(0).optional().describe('The cursor from the previous result'), timeout_seconds: z.number().min(0).max(MAX_WAIT_S).default(MAX_WAIT_S) },
     async ({ cursor, timeout_seconds }) => {
-      const { event, cursor: next } = await waitForEvent(ctx, cursor, timeout_seconds);
+      ctx.db.lastWaitAt = Date.now();
+      const { event, cursor: next } = await waitForEvent(ctx, cursor, timeout_seconds).finally(() => { ctx.db.lastWaitAt = Date.now(); });
       return event
         ? { summary: `${event.session}: ${event.type.replace('_', ' ')}. ${event.summary}`, event: { ...event, ts: new Date(event.ts).toISOString() }, cursor: next }
         : { summary: 'No new events.', event: null, cursor: next };

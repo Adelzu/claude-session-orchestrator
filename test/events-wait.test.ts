@@ -81,3 +81,23 @@ test('retention: old events are pruned', () => {
   db.pruneEvents();
   assert.equal(db.db.prepare(`SELECT COUNT(*) n FROM events WHERE summary = 'old'`).get()!.n, 0);
 });
+
+test('entry tools carry the watch guidance only while nobody is watching events_wait', async () => {
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { mcpServer } = await import('../src/server.ts');
+  const { WATCH_GUIDANCE } = await import('../src/tools/common.ts');
+  const { db, ctx } = mk();
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const c = new Client({ name: 't', version: '0' });
+  await Promise.all([mcpServer(ctx).connect(a), c.connect(b)]);
+  const call = async (name: string, args = {}) => JSON.parse(((await c.callTool({ name, arguments: args })) as { content: { text: string }[] }).content[0]!.text);
+  const first = await call('events_pending');
+  assert.equal(first.guidance, WATCH_GUIDANCE);
+  assert.ok(!first.summary.includes('events_wait'), 'never in the spoken summary');
+  await call('events_wait', { timeout_seconds: 0 });
+  assert.equal((await call('events_pending')).guidance, undefined, 'already watching: no second nudge');
+  assert.equal((await call('machine_list')).guidance, undefined, 'other tools never carry it');
+  db.lastWaitAt = Date.now() - 300_000;
+  assert.equal((await call('events_pending')).guidance, WATCH_GUIDANCE, 'a lapsed watch is nudged again');
+});

@@ -42,6 +42,12 @@ const HINTS: Record<string, Hint> = {
   agent_status: ['Local agent job status', 'read'],
 };
 
+/** Tools a voice/chat assistant starts with when it begins coordinating sessions. */
+const ENTRY_TOOLS = new Set(['events_pending', 'session_list', 'session_read', 'session_send', 'session_start']);
+/** Shown (as `guidance`, never in the spoken summary) by an entry tool while nothing is watching events_wait. */
+export const WATCH_GUIDANCE = 'You are now coordinating orchestrator sessions. Watch them live: open events_wait as a BACKGROUND wait (no cursor the first time, then the cursor from its last result; timeout 170) and re-open it after every result or timeout. Never block your reply on it and never announce empty polls; keep speaking normally and mention an event only if it matters (a session finished, needs approval, stopped or crashed). If you are already watching, do not open a second wait.';
+const WATCH_GRACE_MS = 200_000; // a wait lasts up to 170 s, so a gap longer than this means nobody is watching
+
 /**
  * Register a tool that returns `{ summary, ...detail }` (one speakable sentence first),
  * with every call written to the audit log.
@@ -58,6 +64,7 @@ export function tool<S extends ZodRawShape>(
     try {
       const out = await fn(args);
       ctx.db.audit(name, args);
+      if (ENTRY_TOOLS.has(name) && !ctx.db.watching(WATCH_GRACE_MS)) out.guidance = WATCH_GUIDANCE;
       return { content: [{ type: 'text' as const, text: JSON.stringify(out, null, 1) }] };
     } catch (e) {
       const msg = e instanceof UserError ? e.message : `Internal error: ${(e as Error).message}`;

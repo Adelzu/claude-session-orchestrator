@@ -170,6 +170,11 @@ export class Db {
     if (type && (force || before !== status)) this.emit(type, name, message ?? (type === 'idle' ? 'finished its work' : type === 'crashed' ? `ended unexpectedly (${source})` : type === 'stopped' ? 'stopped' : type === 'approval' ? 'needs approval' : 'is waiting for you'));
   }
 
+  /** When an events_wait call last started or ended. */
+  lastWaitAt = 0;
+  /** Is someone watching the event stream (a wait is open, or one ended within `graceMs`)? */
+  watching(graceMs: number) { return this.waiters.size > 0 || Date.now() - this.lastWaitAt < graceMs; }
+
   /** Callers of events_wait parked until the next event. */
   waiters = new Set<() => void>();
 
