@@ -52,7 +52,7 @@ export function brainPath(rel: string, dir = brainDir()): string {
 }
 
 const git = (dir: string, ...args: string[]) =>
-  exec('git', ['-C', dir, '-c', 'user.name=session-orchestrator', '-c', 'user.email=orchestrator@localhost', ...args]);
+  exec('git', ['-C', dir, '-c', 'user.name=orchestrator-bot', '-c', 'user.email=orchestrator-bot@adelzu.com', ...args]);
 
 // One git operation at a time, or concurrent writes trip over index.lock.
 let queue: Promise<unknown> = Promise.resolve();
