@@ -26,6 +26,7 @@ const HINTS: Record<string, Hint> = {
   file_list: ['List shared files', 'read'],
   file_revoke: ['Revoke a shared file', 'write'],
   events_pending: ['What is waiting for me', 'read'],
+  events_wait: ['Wait for the next event', 'read'],
   overview: ['Overview of all projects', 'read'],
   memory_search: ['Search shared memory', 'read'],
   memory_read: ['Read a memory file', 'read'],

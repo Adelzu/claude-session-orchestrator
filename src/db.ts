@@ -49,6 +49,10 @@ export class Db {
     for (const col of ['claude_id TEXT', 'transcript TEXT', 'created INTEGER', 'target TEXT', 'tmux_session TEXT', 'claude_pid INTEGER', 'tmux_orig TEXT']) {
       try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
     }
+    for (const col of ['type TEXT', 'summary TEXT']) {
+      try { this.db.exec(`ALTER TABLE events ADD COLUMN ${col}`); } catch { /* already there */ }
+    }
+    this.pruneEvents();
     for (const col of ['grp TEXT', 'label TEXT', 'by_session TEXT', 'by_machine TEXT']) {
       try { this.db.exec(`ALTER TABLE shares ADD COLUMN ${col}`); } catch { /* already there */ }
     }
@@ -153,12 +157,44 @@ export class Db {
       .all(project) as unknown as SessionRow[];
   }
 
-  /** Every change of status is logged with its source (hook, refresh, discovery, stop, ...). */
-  setStatus(name: string, status: Status, message: string | null = null, source = 'unknown') {
+  /** Every change of status is logged with its source (hook, refresh, discovery, stop, ...). A session that stops working (idle, waiting, stopped) also lands in the event stream; `force` (hooks) does so even without a change. */
+  setStatus(name: string, status: Status, message: string | null = null, source = 'unknown', force = false) {
     const before = this.session(name)?.status;
     if (before !== status) console.log(`status: ${name} ${before ?? '-'} -> ${status} (${source})`);
     this.db.prepare(`UPDATE sessions SET status = ?, status_since = ?, last_message = ? WHERE name = ?`)
       .run(status, Date.now(), message, name);
+    const type = status === 'stopped' ? (/tmux session is gone|no claude in its pane/.test(source) ? 'crashed' : 'stopped')
+      : status === 'waiting_approval' ? 'approval' : status === 'idle' || status === 'waiting_input' ? status : null;
+    if (type && (force || before !== status)) this.emit(type, name, message ?? (type === 'idle' ? 'finished its work' : type === 'crashed' ? `ended unexpectedly (${source})` : type === 'stopped' ? 'stopped' : type === 'approval' ? 'needs approval' : 'is waiting for you'));
+  }
+
+  /** Callers of events_wait parked until the next event. */
+  waiters = new Set<() => void>();
+
+  /** Add to the event stream (the events_wait queue). Same session + type within 5 s is one event (a hook and a pane refresh can both see it). */
+  emit(type: string, session: string, summary: string): number | null {
+    const now = Date.now();
+    if (this.db.prepare(`SELECT 1 FROM events WHERE type = ? AND session = ? AND ts > ?`).get(type, session, now - 5000)) return null;
+    const id = Number(this.db.prepare(`INSERT INTO events (session, hook, status, message, ts, type, summary) VALUES (?, 'emit', ?, NULL, ?, ?, ?)`)
+      .run(session, type, now, type, summary.slice(0, 500)).lastInsertRowid);
+    for (const w of [...this.waiters]) w();
+    return id;
+  }
+
+  /** The id of the newest stream event (0 if none): the cursor a caller starts from to see only new events. */
+  lastEventId(): number {
+    return (this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM events WHERE type IS NOT NULL`).get() as { n: number }).n;
+  }
+
+  /** The oldest stream event after `cursor`. */
+  eventAfter(cursor: number) {
+    return this.db.prepare(`SELECT id, type, session, summary, ts FROM events WHERE type IS NOT NULL AND id > ? ORDER BY id LIMIT 1`).get(cursor) as
+      { id: number; type: string; session: string; summary: string; ts: number } | undefined;
+  }
+
+  /** Keep 7 days and at most the newest 10000 events. */
+  pruneEvents() {
+    this.db.prepare(`DELETE FROM events WHERE ts < ? OR id <= (SELECT COALESCE(MAX(id), 0) - 10000 FROM events)`).run(Date.now() - 7 * 86400_000);
   }
 
   session(name: string) {
@@ -187,6 +223,8 @@ export class Db {
   finishJob(id: string, status: 'done' | 'failed', result: string) {
     this.db.prepare(`UPDATE jobs SET status = ?, result = ?, finished = ? WHERE id = ?`)
       .run(status, result, Date.now(), id);
+    const j = this.job(id);
+    if (j) this.emit(status === 'done' ? 'job_done' : 'job_failed', `job:${j.agent}`, `job ${id} ${status}: ${(status === 'done' ? j.task : result).slice(0, 200)}`);
   }
 
   job(id: string) {
