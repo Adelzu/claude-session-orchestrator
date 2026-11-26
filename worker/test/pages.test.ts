@@ -103,6 +103,13 @@ test('files: groups with sub-labels, View all, Delete group (confirm link), sing
   assert.match(h, /href="\/f\/z1x+\/a\.bin">Download/);
 });
 
+test('files: the confirm step is a centered modal overlay, not a banner in the list', () => {
+  const h = dashboardPage(base({ active: 'files', files: { ok: true, items: [] }, confirm: { group: 'g', name: 'g', count: 2 } }));
+  assert.match(h, /<div class="modal"><div class="card warn" role="alertdialog" aria-modal="true">/);
+  assert.match(h, /\.modal\{position:fixed;inset:0/);
+  assert.ok(h.indexOf('Yes, delete group') < h.indexOf('</main>'));
+});
+
 test('files: confirm step for one file and for a group; flash', () => {
   const one = dashboardPage(base({ active: 'files', files: { ok: true, items: [F('a1', 'S00.png', null, null)] }, confirm: { id: 'a1xxxxxxxxxxxxxxxxxxxx', name: 'S00.png', count: 1 } }));
   assert.match(one, /Revoke S00\.png\?/);

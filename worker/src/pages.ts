@@ -146,10 +146,10 @@ const files: Section = {
   render: (d) => {
     const f = d.files;
     const c = d.confirm;
-    const confirm = c ? `<div class="card warn"><strong>${c.group ? `Delete the group "${esc(c.group)}"?` : `Revoke ${esc(c.name)}?`}</strong>
+    const confirm = c ? `<div class="modal"><div class="card warn" role="alertdialog" aria-modal="true"><strong>${c.group ? `Delete the group "${esc(c.group)}"?` : `Revoke ${esc(c.name)}?`}</strong>
 <p>${c.group ? `This stops sharing all ${c.count} file${c.count === 1 ? '' : 's'} in it now` : 'This stops sharing it now'} and cuts running downloads. The files on your machine are kept.</p>
 <form method="post" action="/dashboard/files/revoke" class="inline"><input type="hidden" name="${c.group ? 'group' : 'id'}" value="${esc(c.group ?? c.id ?? '')}">
-<button class="primary">${c.group ? 'Yes, delete group' : 'Yes, revoke'}</button><a class="btn" href="/dashboard/files">Cancel</a></form></div>` : '';
+<button class="primary">${c.group ? 'Yes, delete group' : 'Yes, revoke'}</button><a class="btn" href="/dashboard/files">Cancel</a></form></div></div>` : '';
     const all = groupFiles(f?.items ?? []);
     const groups = all.map((g) => {
       const rows = (showBy: boolean) => g.labels.map((l) => `${l.label ? `<h3>${esc(l.label)}</h3>` : ''}<ul class="list">${l.items.map((x) => fileRow(x, showBy)).join('')}</ul>`).join('');
@@ -224,7 +224,7 @@ input[type=checkbox]{width:20px;height:20px;vertical-align:middle;margin-right:8
 form.inline{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .pill{display:inline-block;padding:2px 12px;border-radius:99px;border:1px solid var(--line);font-size:14px}.pill.on{color:var(--ok);border-color:var(--ok)}
 .steps{padding-left:20px}a{color:var(--accent)}
-h3{font-size:.95rem;margin:12px 0 0;color:var(--muted);font-weight:600}.grouphead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;cursor:pointer;list-style:none}.grouphead::-webkit-details-marker{display:none}.grouphead::before{content:'\\25B8';color:var(--muted);width:1em}details[open]>.grouphead::before{content:'\\25BE'}.grouphead .grow{flex:1 1 200px;min-width:0}.grouphead h2{margin:0;display:block}.group .list{margin:4px 0 8px}.other{margin:24px 0 0}
+h3{font-size:.95rem;margin:12px 0 0;color:var(--muted);font-weight:600}.grouphead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;cursor:pointer;list-style:none}.grouphead::-webkit-details-marker{display:none}.grouphead::before{content:'\\25B8';color:var(--muted);width:1em}details[open]>.grouphead::before{content:'\\25BE'}.grouphead .grow{flex:1 1 200px;min-width:0}.grouphead h2{margin:0;display:block}.group .list{margin:4px 0 8px}.other{margin:24px 0 0}.modal{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.5)}.modal .card{margin:0;max-width:420px;width:100%}
 @media (max-width:720px){
 .shell{grid-template-columns:minmax(0,1fr)}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 16px 0;flex-direction:row;flex-wrap:wrap;align-items:center}
 .brand{padding:0 0 8px;flex:1}.who{margin:0 0 8px;padding:0}.who .name{display:none}.who form{margin:0}
