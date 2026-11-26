@@ -38,6 +38,7 @@ export function filesServer(ctx: Ctx, caller: Caller | null = null) {
 
 export async function boot() {
   const ctx = { cfg: loadConfig(), db: new Db() };
+  memory.setPushFailureSink((m) => ctx.db.addPushFailure(m));
   await memory.ensureBrain();
   ctx.db.failOrphanJobs();
   return ctx;

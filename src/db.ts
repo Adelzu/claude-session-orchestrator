@@ -35,6 +35,8 @@ export class Db {
       CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY, session TEXT NOT NULL, hook TEXT NOT NULL,
         status TEXT NOT NULL, message TEXT, ts INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS push_failures (
+        id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, error TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY, agent TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL,
         result TEXT, started INTEGER NOT NULL, finished INTEGER);
@@ -192,8 +194,15 @@ export class Db {
       { id: number; type: string; session: string; summary: string; ts: number } | undefined;
   }
 
-  /** Keep 7 days and at most the newest 10000 events. */
+  /** A failed brain push (kept 7 days, like events). */
+  addPushFailure(error: string) {
+    this.db.prepare(`INSERT INTO push_failures (ts, error) VALUES (?, ?)`).run(Date.now(), error.slice(0, 500));
+    this.pruneEvents();
+  }
+
+  /** Keep 7 days and at most the newest 10000 events; failed-push log entries also 7 days. */
   pruneEvents() {
+    this.db.prepare(`DELETE FROM push_failures WHERE ts < ?`).run(Date.now() - 7 * 86400_000);
     this.db.prepare(`DELETE FROM events WHERE ts < ? OR id <= (SELECT COALESCE(MAX(id), 0) - 10000 FROM events)`).run(Date.now() - 7 * 86400_000);
   }
 

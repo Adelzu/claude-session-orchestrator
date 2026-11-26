@@ -26,6 +26,7 @@ export async function ensureBrain(dir = brainDir()) {
     await git(dir, 'init', '-q');
     await commit(dir, 'init brain');
   }
+  schedulePush(dir); // commits made before a restart that were not pushed yet
 }
 
 const inside = (root: string, p: string) => p === root || p.startsWith(root + sep);
@@ -61,10 +62,31 @@ export function commit(dir: string, message: string): Promise<void> {
     const { stdout } = await git(dir, 'status', '--porcelain');
     if (!stdout.trim()) return;
     await git(dir, 'commit', '-q', '-m', message);
-    if (process.env.BRAIN_PUSH === '1') git(dir, 'push', '-q').catch((e) => console.error('brain push failed:', e.message));
+    schedulePush(dir);
   });
   queue = next.catch(() => {});
   return next;
+}
+
+// Backup push (BRAIN_PUSH=1): one push per BRAIN_PUSH_DELAY_S (default 180) after the first unpushed commit, so
+// rapid edits share a push. A failed push is logged and retried on the next tick; it never blocks a write.
+let pushTimer: NodeJS.Timeout | undefined;
+let onPushFail: (message: string) => void = () => {};
+export const setPushFailureSink = (f: (message: string) => void) => { onPushFail = f; };
+export function schedulePush(dir: string) {
+  if (process.env.BRAIN_PUSH !== '1' || pushTimer) return;
+  const delay = Math.max(Number(process.env.BRAIN_PUSH_DELAY_S) || 180, 1) * 1000;
+  pushTimer = setTimeout(async () => {
+    pushTimer = undefined;
+    try { await exec('git', ['-C', dir, 'push', '-q'], { timeout: 120_000 }); }
+    catch (e) {
+      const msg = (e as Error).message.split('\n')[0]!;
+      console.error('brain push failed, will retry:', msg);
+      try { onPushFail(msg); } catch { /* logging must never break the retry */ }
+      schedulePush(dir);
+    }
+  }, delay);
+  pushTimer.unref();
 }
 
 /** Shared paths linked to a project: projects.yaml `shared` + lines in projects/<p>/links.md. */
