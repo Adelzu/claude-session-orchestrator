@@ -1,6 +1,6 @@
 import type { ConsentDescription } from '@cloudflare/workers-oauth-provider';
 import type { Provider } from './identity.ts';
-import { expiresIn, groupFiles, humanSize, sharedBy, sinceText, viewKind, type FileRow, type ViewItem } from './files.ts';
+import { expiresIn, groupFiles, humanSize, sessionKey, sessionsOf, sharedBy, sinceText, viewKind, type FileRow, type ViewItem } from './files.ts';
 import type { Resolved } from './settings.ts';
 
 const esc = (v: string) => v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -82,6 +82,8 @@ export interface DashData {
   origin: string; user: Session; owner: boolean; active: string; status: Status | null;
   tokens: TokenRow[]; newToken: string | null;
   files: { ok: boolean; items: FileRow[]; error?: string } | null;
+  /** Files tab: the selected session key (see sessionKey); null or unknown = All. */
+  session?: string | null;
   settings: { resolved: Resolved; error?: string } | null;
   flash: string | null;
   confirm?: { id?: string; group?: string; name: string; count: number } | null;
@@ -150,7 +152,10 @@ const files: Section = {
 <p>${c.group ? `This stops sharing all ${c.count} file${c.count === 1 ? '' : 's'} in it now` : 'This stops sharing it now'} and cuts running downloads. The files on your machine are kept.</p>
 <form method="post" action="/dashboard/files/revoke" class="inline"><input type="hidden" name="${c.group ? 'group' : 'id'}" value="${esc(c.group ?? c.id ?? '')}">
 <button class="primary">${c.group ? 'Yes, delete group' : 'Yes, revoke'}</button><a class="btn" href="/dashboard/files">Cancel</a></form></div></div>` : '';
-    const all = groupFiles(f?.items ?? []);
+    const everything = f?.items ?? [];
+    const sessions = sessionsOf(everything);
+    const sel = sessions.find((x) => x.key === d.session)?.key ?? '';
+    const all = groupFiles(sel ? everything.filter((x) => sessionKey(x) === sel) : everything);
     const groups = all.map((g) => {
       const rows = (showBy: boolean) => g.labels.map((l) => `${l.label ? `<h3>${esc(l.label)}</h3>` : ''}<ul class="list">${l.items.map((x) => fileRow(x, showBy)).join('')}</ul>`).join('');
       if (g.name === null) return `${all.length > 1 ? '<h2 class="other">Other files</h2>' : ''}${rows(true)}`;
@@ -161,10 +166,15 @@ const files: Section = {
       return `<details class="card group" data-g="${esc(g.name)}" open><summary class="grouphead"><span class="grow"><h2>${esc(g.name)} <span class="muted">· ${items.length} file${items.length === 1 ? '' : 's'}</span></h2>
 <span class="muted">${sharedText(at, by)}</span></span>${first ? `<a class="btn" href="/view/${enc(first.id)}/${enc(first.name)}">View all</a>` : ''}<a class="btn" href="/dashboard/files?revoke_group=${enc(g.name)}">Delete group</a></summary>${rows(false)}</details>`;
     }).join('');
+    const link = (key: string) => `/dashboard/files?s=${enc(key)}`;
+    const name = (x: { session: string | null; machine: string | null }) => x.session ? `<span dir="auto">${esc(x.session)}</span>${x.machine ? ` <span class="muted">on <span dir="auto">${esc(x.machine)}</span></span>` : ''}` : 'orchestrator';
+    const item = (key: string, label: string, n: number) => `<a href="${link(key)}" data-s="${esc(key)}"${key === sel ? ' aria-current="true"' : ''}><span class="sn">${label}</span><span class="count">${n}</span></a>`;
+    const nav = sessions.length ? `<nav class="sess" aria-label="Sessions">${item('', 'All', everything.length)}${sessions.map((x) => item(x.key, name(x), x.count)).join('')}</nav>
+<form method="get" action="/dashboard/files" class="sess-pick"><label class="muted" for="sp">Session</label><select id="sp" name="s">${[{ key: '', label: 'All', n: everything.length }, ...sessions.map((x) => ({ key: x.key, label: x.session ? `${x.session}${x.machine ? ` on ${x.machine}` : ''}` : 'orchestrator', n: x.count }))].map((o) => `<option value="${esc(o.key)}"${o.key === sel ? ' selected' : ''}>${esc(o.label)} (${o.n})</option>`).join('')}</select><noscript><button>Show</button></noscript></form>` : '';
     return `<h1>Files</h1>
 <p class="muted">Files your agent shares. They stream from your machine to this browser and are never stored here. Ask Claude to share one (file_share, optionally with a group).</p>
 ${d.flash ? `<div class="card warn">${esc(d.flash)}</div>` : ''}${confirm}
-${!f || !f.ok ? `<div class="card warn">${esc(f?.error ?? 'Files are unavailable.')}</div>` : groups || '<p class="muted">Nothing is shared right now.</p>'}`;
+${!f || !f.ok ? `<div class="card warn">${esc(f?.error ?? 'Files are unavailable.')}</div>` : `<div class="fl" data-sel="${esc(sel)}">${nav}<div class="flist">${groups || '<p class="muted">Nothing is shared right now.</p>'}</div></div>`}`;
   },
 };
 
@@ -205,7 +215,7 @@ const DASH_CSS = `
 @media (prefers-color-scheme:dark){:root{--bg:#1c1c1a;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--accent:#e08a6a;--card:#252522;--ok:#5cc58d}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,sans-serif}
 .shell{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:100vh}
-.side{background:var(--card);border-right:1px solid var(--line);padding:20px 12px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
+.side{background:var(--card);border-inline-end:1px solid var(--line);padding:20px 12px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
 .brand{font-weight:650;padding:0 12px 16px}.side nav{display:flex;flex-direction:column;gap:2px}
 .side nav a{display:flex;align-items:center;min-height:44px;padding:0 12px;border-radius:8px;color:var(--fg);text-decoration:none}
 .side nav a:hover{background:var(--bg)}.side nav a[aria-current=page]{background:var(--bg);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}
@@ -218,14 +228,20 @@ pre.copy{user-select:all;cursor:copy}
 button,.btn{display:inline-flex;align-items:center;min-height:44px;font:inherit;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;text-decoration:none}
 .primary{background:var(--accent);border-color:var(--accent);color:#fff}
 input[type=text]{font:inherit;min-height:44px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);width:100%;max-width:360px}
-input[type=checkbox]{width:20px;height:20px;vertical-align:middle;margin-right:8px}
+input[type=checkbox]{width:20px;height:20px;vertical-align:middle;margin-inline-end:8px}
 .list{list-style:none;padding:0;margin:8px 0}.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:8px 0}
 .row .grow{flex:1 1 200px;min-width:0;overflow-wrap:anywhere}.row form{margin:0}
 form.inline{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .pill{display:inline-block;padding:2px 12px;border-radius:99px;border:1px solid var(--line);font-size:14px}.pill.on{color:var(--ok);border-color:var(--ok)}
 .steps{padding-left:20px}a{color:var(--accent)}
 h3{font-size:.95rem;margin:12px 0 0;color:var(--muted);font-weight:600}.grouphead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;cursor:pointer;list-style:none}.grouphead::-webkit-details-marker{display:none}.grouphead::before{content:'\\25B8';color:var(--muted);width:1em}details[open]>.grouphead::before{content:'\\25BE'}.grouphead .grow{flex:1 1 200px;min-width:0}.grouphead h2{margin:0;display:block}.group .list{margin:4px 0 8px}.other{margin:24px 0 0}.modal{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.5)}.modal .card{margin:0;max-width:420px;width:100%}
+:dir(rtl) .side nav a[aria-current=page]{box-shadow:inset -3px 0 0 var(--accent)}:dir(rtl) .grouphead::before{content:'\\25C2'}:dir(rtl) details[open]>.grouphead::before{content:'\\25BE'}
+.fl{display:grid;grid-template-columns:200px minmax(0,1fr);gap:20px;align-items:start}.flist{min-width:0}
+.sess{display:flex;flex-direction:column;gap:2px;position:sticky;top:16px}.sess a{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px;padding:0 12px;border-radius:8px;color:var(--fg);text-decoration:none;border-inline-start:3px solid transparent}
+.sess a:hover{background:var(--card)}.sess a[aria-current]{background:var(--card);font-weight:600;border-inline-start-color:var(--accent)}.sess .sn{min-width:0;overflow-wrap:anywhere}.count{flex:none;font-size:13px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:0 8px}
+.sess-pick{display:none;margin:0 0 12px;gap:8px;align-items:center}.sess-pick select{flex:1;min-height:44px;font:inherit;padding:0 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
 @media (max-width:720px){
+.fl{display:block}.sess{display:none}.sess-pick{display:flex}
 .shell{grid-template-columns:minmax(0,1fr)}.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 16px 0;flex-direction:row;flex-wrap:wrap;align-items:center}
 .brand{padding:0 0 8px;flex:1}.who{margin:0 0 8px;padding:0}.who .name{display:none}.who form{margin:0}
 .side nav{flex:0 0 100%;flex-direction:row;overflow-x:auto;order:3;gap:4px}.side nav a{white-space:nowrap;border-radius:8px 8px 0 0}
@@ -248,10 +264,17 @@ function refresh(){
     }).catch(function(){});
   },250);
 }
+var KEY='orch.files.session';
+function remember(v){try{localStorage.setItem(KEY,v)}catch(e){}}
+document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('.sess a[data-s]');if(a)remember(a.dataset.s)});
+document.addEventListener('change',function(e){var t=e.target;if(t&&t.matches&&t.matches('.sess-pick select')){remember(t.value);t.form.submit()}});
 es.addEventListener('files',refresh);
 es.onopen=function(){if(seen)refresh();seen=true};
 })();
 </script>`;
+
+/** Files page only, before anything renders: reopen the session this browser last picked (keeps the other query parts, e.g. a revoke confirm). */
+const RESTORE_SCRIPT = `<script>(function(){try{var u=new URL(location.href);if(u.searchParams.has('s'))return;var k=localStorage.getItem('orch.files.session');if(k){u.searchParams.set('s',k);location.replace(u.href)}}catch(e){}})();</script>`;
 
 export function dashboardPage(d: DashData) {
   const sections = SECTIONS.filter((s) => !s.ownerOnly || d.owner);
@@ -262,7 +285,7 @@ export function dashboardPage(d: DashData) {
 <title>${cur.title} · Session Orchestrator</title><style>${DASH_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">Session Orchestrator</div><nav aria-label="Dashboard sections">${nav}</nav>
 <div class="who"><span class="name muted">${esc(d.user.name)}</span><form method="post" action="/dashboard/logout"><button>Sign out</button></form></div></aside>
-<main class="content">${cur.render(d)}</main></div>${cur.id === 'files' ? LIVE_SCRIPT : ''}</body></html>`;
+${cur.id === 'files' ? RESTORE_SCRIPT : ''}<main class="content">${cur.render(d)}</main></div>${cur.id === 'files' ? LIVE_SCRIPT : ''}</body></html>`;
 }
 
 // ---------- full-screen image viewer: actual size, carousel (arrows, keys, swipe) ----------

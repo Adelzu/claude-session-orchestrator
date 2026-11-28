@@ -195,3 +195,51 @@ test('files page: live refresh keeps which groups are collapsed', () => {
   assert.match(h, /open\[x\.dataset\.g\]=x\.open/);
   assert.match(h, /x\.open=open\[x\.dataset\.g\]/);
 });
+
+const SH = (id: string, session: string | null, machine: string | null, group: string | null, created: number) =>
+  ({ id, name: `${id}.png`, size: 1000, expires: Date.now() + 3_600_000, group, label: null, created, session, machine });
+const files3 = [SH('a1', 'cc-one', 'hub', 'shots', 3000), SH('a2', 'cc-one', 'hub', null, 2000), SH('b1', 'cc-two', 'laptop', 'docs', 1000), SH('o1', null, null, null, 500)];
+const filesPage = (items: typeof files3, session?: string | null) => dashboardPage(base({ files: { ok: true, items }, session }));
+const sideNav = (h: string) => /<nav class="sess"[^>]*>(.*?)<\/nav>/s.exec(h)![1]!;
+
+test('files: sidebar has All first (default, total count) then each sharing session with its count', () => {
+  const nav = sideNav(filesPage(files3));
+  const links = [...nav.matchAll(/<a href="([^"]*)" data-s="([^"]*)"([^>]*)><span class="sn">(.*?)<\/span><span class="count">(\d+)<\/span>/gs)];
+  assert.deepEqual(links.map((m) => m[5]), ['4', '2', '1', '1']);
+  assert.match(links[0]![4]!, /^All$/);
+  assert.match(links[0]![3]!, /aria-current/); // default
+  assert.match(links[1]![4]!, /cc-one.*hub/s);
+  assert.match(links[2]![4]!, /cc-two.*laptop/s);
+  assert.match(links[3]![4]!, /orchestrator/);
+  assert.equal(links[1]![2], 's:cc-one|hub'); assert.equal(links[1]![1], '/dashboard/files?s=s%3Acc-one%7Chub');
+});
+
+test('files: choosing a session shows only its files, groups kept; counts still cover everything', () => {
+  const h = filesPage(files3, 's:cc-one|hub');
+  assert.match(h, /a1\.png/); assert.match(h, /a2\.png/);
+  assert.doesNotMatch(h, /b1\.png/); assert.doesNotMatch(h, /o1\.png/);
+  assert.match(h, /data-g="shots"/); assert.doesNotMatch(h, /data-g="docs"/);
+  assert.match(h, /shared by cc-one on hub/);
+  assert.match(sideNav(h), /<span class="count">4<\/span>/);
+  assert.match(/<a [^>]*data-s="s:cc-one\|hub"([^>]*)>/.exec(sideNav(h))![1]!, /aria-current/);
+});
+
+test('files: an unknown or vanished session falls back to All; counts follow live changes', () => {
+  assert.match(filesPage(files3, 's:gone|x'), /b1\.png/);
+  const after = files3.filter((f) => f.session !== 'cc-two'); // the file list is re-rendered on every SSE refresh
+  const nav = sideNav(filesPage(after, 's:cc-two|laptop'));
+  assert.doesNotMatch(nav, /cc-two/);
+  assert.match(nav, /<span class="count">3<\/span>/);
+});
+
+test('files: phones get a dropdown, RTL uses logical properties, selection is remembered safely', () => {
+  const h = filesPage(files3, 's:cc-two|laptop');
+  assert.match(h, /<select id="sp" name="s"[^>]*>.*<option value="s:cc-two\|laptop" selected>cc-two on laptop \(1\)<\/option>/s);
+  assert.match(h, /\.sess-pick\{display:none/); assert.match(h, /\.fl\{display:block\}\.sess\{display:none\}\.sess-pick\{display:flex\}/);
+  assert.match(h, /border-inline-start-color/); assert.match(h, /:dir\(rtl\)/);
+  assert.doesNotMatch(/\.fl\{display:grid.*?@media/s.exec(h)![0], /(margin|padding|border)-(left|right)|text-align:(left|right)/);
+  assert.match(h, /dir="auto"/);
+  assert.match(h, /try\{localStorage\.setItem\(KEY,v\)\}catch/);
+  assert.match(h, /try\{var u=new URL\(location\.href\).*localStorage\.getItem\('orch\.files\.session'\).*catch/s);
+  assert.doesNotMatch(dashboardPage(base({ active: 'setup' })), /orch\.files\.session/);
+});

@@ -67,7 +67,9 @@ const mcpApi: ExportedHandler<Env> = {
       const text = (summary: string) => ({ content: [{ type: 'text', text: JSON.stringify({ summary }) }], isError: true });
       if (req.params.name === SETUP_TOOL.name) return { content: [{ type: 'text', text: JSON.stringify({ summary: setupText(origin) }) }] };
       const result = await stub.call(req.params.name, req.params.arguments ?? {});
-      return (result ?? text(setupText(origin))) as never;
+      if (result) return result as never;
+      // No socket at all: a hub that has connected before is just offline; only a fresh account needs the setup steps.
+      return text(((await stub.tools()) as ToolInfo[]).length ? 'Your orchestrator hub is offline. Retry in a few seconds; it reconnects by itself.' : setupText(origin)) as never;
     });
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     await server.connect(transport);
@@ -156,13 +158,14 @@ async function revokeFiles(stub: ReturnType<typeof hub>, args: { id: string } | 
   return !!r && !r.isError;
 }
 
-async function dashboardResponse(env: Env, origin: string, session: Props, active: string, s: Resolved, extra: { newToken?: string; flash?: string; settingsError?: string; status?: number; confirmId?: string; confirmGroup?: string } = {}) {
+async function dashboardResponse(env: Env, origin: string, session: Props, active: string, s: Resolved, extra: { newToken?: string; flash?: string; settingsError?: string; status?: number; confirmId?: string; confirmGroup?: string; session?: string } = {}) {
   const stub = hub(env, session.userId);
   const status = await stub.status();
   const data: DashData = { origin, user: session, owner: isOwner(env, session.userId), active, status, tokens: [], newToken: extra.newToken ?? null, files: null, settings: null, flash: extra.flash ?? null };
   if (active === 'machines') data.tokens = await listTokens(env, session.userId);
   if (active === 'files') {
     data.files = await fetchFiles(stub, status.online);
+    data.session = extra.session ?? null;
     const items = data.files.items;
     if (extra.confirmGroup) {
       const n = items.filter((f) => f.group === extra.confirmGroup).length;
@@ -312,7 +315,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (sec.ownerOnly && !isOwner(env, session.userId)) return notFound();
     const q = url.searchParams;
     const extra = sec.id === 'files'
-      ? { flash: DONE[q.get('done') ?? ''], confirmId: q.get('revoke') ?? undefined, confirmGroup: q.get('revoke_group') ?? undefined }
+      ? { flash: DONE[q.get('done') ?? ''], confirmId: q.get('revoke') ?? undefined, confirmGroup: q.get('revoke_group') ?? undefined, session: q.get('s') ?? undefined }
       : {};
     return dashboardResponse(env, url.origin, session, sec.id, set, extra);
   }

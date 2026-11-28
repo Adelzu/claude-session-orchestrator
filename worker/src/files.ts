@@ -146,6 +146,19 @@ export const humanSize = (n: number) =>
 
 /** "cc-filetest on hub"; files shared through the main endpoint (the Claude app, scripts) say "orchestrator". */
 export const sharedBy = (f: Pick<FileRow, 'session' | 'machine'>) => (f.session ? `${f.session}${f.machine ? ` on ${f.machine}` : ''}` : 'orchestrator');
+/** The sidebar key of whoever shared a file: the session on its machine, or the main endpoint ("o:"). */
+export const sessionKey = (f: Pick<FileRow, 'session' | 'machine'>) => (f.session ? `s:${f.session}|${f.machine ?? ''}` : 'o:');
+
+/** Sessions that have shared files, with file counts, the most recent sharer first. */
+export function sessionsOf(items: FileRow[]): { key: string; session: string | null; machine: string | null; count: number; latest: number }[] {
+  const m = new Map<string, { key: string; session: string | null; machine: string | null; count: number; latest: number }>();
+  for (const f of items) {
+    const k = sessionKey(f), e = m.get(k);
+    if (e) { e.count++; e.latest = Math.max(e.latest, f.created); } else m.set(k, { key: k, session: f.session, machine: f.machine, count: 1, latest: f.created });
+  }
+  return [...m.values()].sort((a, b) => b.latest - a.latest || (a.session ?? '').localeCompare(b.session ?? ''));
+}
+
 export const sinceText = (ts: number, now = Date.now()) => {
   const m = Math.floor((now - ts) / 60_000);
   return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.floor(m / 60)} h ago` : `${Math.floor(m / 1440)} d ago`;
