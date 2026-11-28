@@ -602,6 +602,8 @@ test('long-wait guidance reaches every client: server instructions (hub and work
     assert.match(d, /session_read mode=summary about every 30 s/, t);
     assert.match(d, /chunks of 180 s or less/, t);
   }
+  assert.match(SERVER_INSTRUCTIONS, /start of a conversation, memory_read handoff\/current\.md if it exists/);
+  assert.match(SERVER_INSTRUCTIONS, /after every meaningful change .*memory_write handoff\/current\.md.*replace stale lines, keep it short/);
   // The hosted worker serves the same instructions.
   assert.ok(readFileSync(new URL('../worker/src/index.ts', import.meta.url), 'utf8').includes(`instructions: ${JSON.stringify(SERVER_INSTRUCTIONS)}`));
 });

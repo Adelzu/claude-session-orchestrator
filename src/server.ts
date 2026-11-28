@@ -17,7 +17,7 @@ import * as memory from './tools/memory.ts';
 import * as sessions from './tools/sessions.ts';
 
 /** Same text as the hosted worker's (worker/src/index.ts); a unit test keeps them equal. */
-export const BRAIN_RULE = "Keep the shared brain current without being asked: as work happens, append decisions, verified results and status changes (a few lines each) to projects/<project>/notes.md with memory_append, and check memory_search before repeating work.";
+export const BRAIN_RULE = "Keep the shared brain current without being asked: as work happens, append decisions, verified results and status changes (a few lines each) to projects/<project>/notes.md with memory_append, and check memory_search before repeating work. Handoff: at the start of a conversation, memory_read handoff/current.md if it exists; after every meaningful change (decision, deploy, blocker, session started, stopped or finished), memory_write handoff/current.md with a short current-state summary (replace stale lines, keep it short).";
 export const SERVER_INSTRUCTIONS = "Manages the user's Claude Code sessions on their own machines. In voice mode, call events_pending first. Every tool result starts with a one-sentence summary to read out. " + BRAIN_RULE + " " + sessions.LONG_WORK_HINT;
 
 export function mcpServer(ctx: Ctx) {
